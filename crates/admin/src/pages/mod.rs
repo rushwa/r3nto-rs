@@ -1,0 +1,14 @@
+pub mod dashboard;
+pub mod users;
+pub mod agents;
+pub mod properties;
+pub mod property_detail;
+pub mod subscriptions;
+pub mod commissions;
+pub mod inquiries;
+pub mod analytics;
+pub mod settings;
+pub mod login;
+pub mod not_found;
+pub mod user_profile;
+pub mod property_owners;

@@ -1,0 +1,12 @@
+FROM rust:1.75-slim-bookworm AS builder
+
+WORKDIR /app
+RUN rustup target add wasm32-unknown-unknown
+RUN cargo install dioxus-cli
+COPY . .
+RUN cargo build --release -p rento-web --target wasm32-unknown-unknown
+
+FROM nginx:alpine
+COPY --from=builder /app/target/wasm32-unknown-unknown/release/rento-web.wasm /usr/share/nginx/html/
+COPY --from=builder /app/crates/web/index.html /usr/share/nginx/html/
+EXPOSE 80

@@ -1,0 +1,13 @@
+[application]
+name = "rento-web"
+default_platform = "web"
+out_dir = "dist"
+asset_dir = "assets"
+
+[web.app]
+title = "RentoLink"
+base_path = "/"
+
+[web.watcher]
+watch_path = ["src"]
+reload_html = true
