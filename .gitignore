@@ -2,6 +2,7 @@
 **/*.rs.bk
 Cargo.lock
 .env
+.env.example
 uploads/
 *.log
 .DS_Store
