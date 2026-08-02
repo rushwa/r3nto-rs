@@ -14,7 +14,7 @@ use crate::models::agent::Agent;
 use crate::services::admin as admin_service;
 use crate::state::AppState;
 
-use crate::models::admin::{Claims, CreateUserRequest, GrantPrivilegesRequest, LoginRequest, LoginResponse, ToggleUserActiveRequest, UpdateUserRoleRequest};
+use crate::models::admin::{Claims, CreateUserRequest, LoginRequest, LoginResponse, ToggleUserActiveRequest, UpdateUserRoleRequest};
 
 
 pub async fn login(

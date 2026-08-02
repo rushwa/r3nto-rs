@@ -9,10 +9,14 @@ use dioxus::prelude::*;
 
 use crate::components::sidebar::{AdminHeader, AdminSidebar};
 use crate::context::admin_auth::use_admin_auth;
+
+// Existing page imports
 use crate::pages::login::LoginPage;
 use crate::pages::dashboard::DashboardPage;
 use crate::pages::users::UsersPage;
+use crate::pages::user_profile::UserProfilePage;
 use crate::pages::agents::AgentsPage;
+use crate::pages::property_owners::PropertyOwnersPage;
 use crate::pages::properties::PropertiesPage;
 use crate::pages::property_detail::PropertyDetailPage;
 use crate::pages::subscriptions::SubscriptionsPage;
@@ -21,8 +25,10 @@ use crate::pages::inquiries::InquiriesPage;
 use crate::pages::analytics::AnalyticsPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::not_found::NotFoundPage;
-use crate::pages::user_profile::UserProfilePage;
-use crate::pages::property_owners::PropertyOwnersPage;
+
+// NEW AGENT PAGE IMPORTS
+use crate::pages::agent_leads::LeadsPage;
+use crate::pages::agent_conversion::ConversionPage;
 
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
@@ -30,31 +36,50 @@ pub enum AdminRoute {
     #[route("/login")]
     LoginPage,
 
-    #[route("/")]
+    // CORRECT ORDER: #[layout] MUST come before #[route]
     #[layout(AdminLayout)]
+    #[route("/")]
     DashboardPage,
+    
     #[route("/users")]
     UsersPage,
+    
     #[route("/users/:id")]
     UserProfilePage { id: String },
+    
     #[route("/agents")]
     AgentsPage,
+    
     #[route("/property-owners")]
     PropertyOwnersPage,
+    
     #[route("/properties")]
     PropertiesPage,
+    
     #[route("/properties/:id")]
     PropertyDetailPage { id: String },
+    
     #[route("/subscriptions")]
     SubscriptionsPage,
+    
     #[route("/commissions")]
     CommissionsPage,
+    
     #[route("/inquiries")]
     InquiriesPage,
+    
     #[route("/analytics")]
     AnalyticsPage,
+    
     #[route("/settings")]
     SettingsPage,
+
+    // NEW AGENT ROUTES
+    #[route("/leads")]
+    LeadsPage,
+    
+    #[route("/conversion")]
+    ConversionPage,
 
     #[route("/:..segments")]
     NotFoundPage { segments: Vec<String> },

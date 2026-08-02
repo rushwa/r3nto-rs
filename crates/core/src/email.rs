@@ -61,7 +61,7 @@ impl EmailService {
     }
 
     fn build_transport(&self) -> Result<SmtpTransport, RentoError> {
-        let mut builder = if self.smtp_username.is_some() && self.smtp_password.is_some() {
+        let builder = if self.smtp_username.is_some() && self.smtp_password.is_some() {
             // Authenticated SMTP (production)
             let creds = Credentials::new(
                 self.smtp_username.clone().unwrap(),

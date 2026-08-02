@@ -1,211 +1,179 @@
-// crates/api/src/middleware/auth.rs
-
 use axum::{
-    extract::Request,
-    extract::State,
-    middleware::Next,
-    response::Response,
-    http::StatusCode,
+    extract::FromRequestParts,
+    http::{request::Parts, StatusCode, header::AUTHORIZATION},
+    response::{IntoResponse, Response},
+    Json,
 };
+use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use serde::{Deserialize, Serialize};
+use rento_core::models::UserRole;
+use std::future::Future;
+use std::pin::Pin;
 
-use rento_core::models::{UserRole, AccountUser};
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Claims {
+    pub sub: String, // User ID (UUID as string)
+    pub role: UserRole,
+    pub exp: usize,
+    pub iat: usize,
+}
 
-#[derive(Clone, Debug)]
-pub struct AuthenticatedUser {
+// Helper struct to satisfy existing `auth_user.0.user_id` calls in your handlers
+#[derive(Debug, Clone)]
+pub struct AuthUserData {
     pub user_id: uuid::Uuid,
     pub role: UserRole,
-    pub username: String,
-    pub email: String,
-    pub is_staff: bool,
-    pub is_superuser: bool,
 }
 
-impl AuthenticatedUser {
-    pub fn is_admin(&self) -> bool {
-        self.is_superuser || self.role == UserRole::Admin
-    }
+pub enum AuthError {
+    InvalidToken,
+    MissingToken,
+    InsufficientPermissions,
+}
 
-    pub fn is_agent(&self) -> bool {
-        self.role == UserRole::Agent
-    }
-
-    pub fn is_property_owner(&self) -> bool {
-        self.role == UserRole::PropertyOwner
-    }
-
-    pub fn is_client(&self) -> bool {
-        self.role == UserRole::Client
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match self {
+            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid or expired token"),
+            AuthError::MissingToken => (StatusCode::UNAUTHORIZED, "Missing authorization token"),
+            AuthError::InsufficientPermissions => (StatusCode::FORBIDDEN, "Insufficient permissions"),
+        };
+        (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
 }
 
-pub async fn auth_middleware(
-    State(state): State<crate::state::AppState>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let token = request.headers()
-        .get("Authorization")
+fn extract_and_verify_claims(parts: &mut Parts) -> Result<Claims, AuthError> {
+    let token = parts
+        .headers
+        .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .or_else(|| {
-            request.headers()
-                .get("Cookie")
-                .and_then(|c| c.to_str().ok())
-                .and_then(|cookies| {
-                    cookies.split(';').find_map(|cookie| {
-                        let mut parts = cookie.trim().splitn(2, '=');
-                        let name = parts.next()?;
-                        let value = parts.next()?;
-                        if name == "access_token" {
-                            Some(value)
-                        } else {
-                            None
-                        }
-                    })
-                })
-        });
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .ok_or(AuthError::MissingToken)?;
 
-    if let Some(token) = token {
-        match state.auth.verify_token(token) {
-            Ok(claims) => {
-                let user_result = sqlx::query_as::<_, AccountUser>(
-                    "SELECT * FROM account_users WHERE id = $1"
-                )
-                    .bind(claims.sub)
-                    .fetch_optional(&state.db.pool)
-                    .await;
+    let mut validation = Validation::default();
+    validation.algorithms = vec![Algorithm::HS256];
 
-                if let Ok(Some(user)) = user_result {
-                    let auth_user = AuthenticatedUser {
-                        user_id: user.id,
-                        role: user.role,
-                        username: user.username,
-                        email: user.email,
-                        is_staff: user.is_staff,
-                        is_superuser: user.is_superuser,
-                    };
-                    request.extensions_mut().insert(auth_user);
-                }
+    let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set in .env");
+    let key = DecodingKey::from_secret(secret.as_ref());
+    
+    let token_data = decode::<Claims>(token, &key, &validation)
+        .map_err(|_| AuthError::InvalidToken)?;
+
+    Ok(token_data.claims)
+}
+
+// 1. RequireAuth (Tuple struct to match existing `auth_user.0.user_id` usage)
+pub struct RequireAuth(pub AuthUserData);
+
+impl<S> FromRequestParts<S> for RequireAuth
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    fn from_request_parts<'life0, 'life1, 'async_trait>(
+        parts: &'life0 mut Parts,
+        _state: &'life1 S,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+    {
+        Box::pin(async move {
+            let claims = extract_and_verify_claims(parts)?;
+            let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+            Ok(RequireAuth(AuthUserData { user_id, role: claims.role }))
+        })
+    }
+}
+
+// 2. AdminUser
+pub struct AdminUser {
+    pub user_id: uuid::Uuid,
+    pub claims: Claims,
+}
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    fn from_request_parts<'life0, 'life1, 'async_trait>(
+        parts: &'life0 mut Parts,
+        _state: &'life1 S,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+    {
+        Box::pin(async move {
+            let claims = extract_and_verify_claims(parts)?;
+            if claims.role != UserRole::Admin {
+                return Err(AuthError::InsufficientPermissions);
             }
-            Err(_) => {}
-        }
-    }
-
-    Ok(next.run(request).await)
-}
-
-// Extractor that requires authentication
-pub struct RequireAuth(pub AuthenticatedUser);
-
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<crate::state::AppState> for RequireAuth {
-    type Rejection = rento_core::error::RentoError;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &crate::state::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts.extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| rento_core::error::RentoError::Auth("Authentication required".to_string()))?;
-
-        Ok(Self(auth_user))
+            let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+            Ok(AdminUser { user_id, claims })
+        })
     }
 }
 
-// Extractor that requires admin
-pub struct RequireAdmin(pub AuthenticatedUser);
+// 3. RequireStaff
+pub struct RequireStaff(pub AuthUserData);
 
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<crate::state::AppState> for RequireAdmin {
-    type Rejection = rento_core::error::RentoError;
+impl<S> FromRequestParts<S> for RequireStaff
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
 
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &crate::state::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts.extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| rento_core::error::RentoError::Auth("Authentication required".to_string()))?;
-
-        if !auth_user.is_admin() {
-            return Err(rento_core::error::RentoError::Authorization("Admin access required".to_string()));
-        }
-
-        Ok(Self(auth_user))
+    fn from_request_parts<'life0, 'life1, 'async_trait>(
+        parts: &'life0 mut Parts,
+        _state: &'life1 S,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+    {
+        Box::pin(async move {
+            let claims = extract_and_verify_claims(parts)?;
+            if claims.role != UserRole::Admin { // Adjust to UserRole::Staff if your enum has it
+                return Err(AuthError::InsufficientPermissions);
+            }
+            let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+            Ok(RequireStaff(AuthUserData { user_id, role: claims.role }))
+        })
     }
 }
 
-// Extractor that requires staff
-pub struct RequireStaff(pub AuthenticatedUser);
+// 4. RequireAgentOrAdmin
+pub struct RequireAgentOrAdmin(pub AuthUserData);
 
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<crate::state::AppState> for RequireStaff {
-    type Rejection = rento_core::error::RentoError;
+impl<S> FromRequestParts<S> for RequireAgentOrAdmin
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
 
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &crate::state::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts.extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| rento_core::error::RentoError::Auth("Authentication required".to_string()))?;
-
-        if !auth_user.is_admin() && !auth_user.is_staff {
-            return Err(rento_core::error::RentoError::Authorization("Staff access required".to_string()));
-        }
-
-        Ok(Self(auth_user))
-    }
-}
-
-// Extractor that requires agent or admin
-pub struct RequireAgentOrAdmin(pub AuthenticatedUser);
-
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<crate::state::AppState> for RequireAgentOrAdmin {
-    type Rejection = rento_core::error::RentoError;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &crate::state::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts.extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| rento_core::error::RentoError::Auth("Authentication required".to_string()))?;
-
-        if !auth_user.is_admin() && !auth_user.is_agent() {
-            return Err(rento_core::error::RentoError::Authorization("Agent or admin access required".to_string()));
-        }
-
-        Ok(Self(auth_user))
-    }
-}
-
-// Extractor that requires property owner
-pub struct RequirePropertyOwner(pub AuthenticatedUser);
-
-#[axum::async_trait]
-impl axum::extract::FromRequestParts<crate::state::AppState> for RequirePropertyOwner {
-    type Rejection = rento_core::error::RentoError;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &crate::state::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts.extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| rento_core::error::RentoError::Auth("Authentication required".to_string()))?;
-
-        if !auth_user.is_admin() && !auth_user.is_property_owner() {
-            return Err(rento_core::error::RentoError::Authorization("Property owner access required".to_string()));
-        }
-
-        Ok(Self(auth_user))
+    fn from_request_parts<'life0, 'life1, 'async_trait>(
+        parts: &'life0 mut Parts,
+        _state: &'life1 S,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+    {
+        Box::pin(async move {
+            let claims = extract_and_verify_claims(parts)?;
+            if claims.role != UserRole::Agent && claims.role != UserRole::Admin {
+                return Err(AuthError::InsufficientPermissions);
+            }
+            let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+            Ok(RequireAgentOrAdmin(AuthUserData { user_id, role: claims.role }))
+        })
     }
 }

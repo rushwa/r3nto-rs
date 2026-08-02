@@ -1,6 +1,8 @@
 pub mod dashboard;
 pub mod users;
+pub mod user_profile;
 pub mod agents;
+pub mod property_owners;
 pub mod properties;
 pub mod property_detail;
 pub mod subscriptions;
@@ -10,5 +12,7 @@ pub mod analytics;
 pub mod settings;
 pub mod login;
 pub mod not_found;
-pub mod user_profile;
-pub mod property_owners;
+
+// NEW AGENT PAGES
+pub mod agent_leads;
+pub mod agent_conversion;

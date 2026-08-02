@@ -10,7 +10,7 @@ pub fn SettingsPage() -> Element {
     let token = auth.read().token.clone().unwrap_or_default();
     let token_for_resource = token.clone();
     let mut saving = use_signal(|| false);
-    let mut message = use_signal(|| None::<String>);
+    let mut message = use_signal(|| None<String>);
 
     let settings = use_resource(move || {
         let t = token_for_resource.clone();

@@ -22,7 +22,6 @@ mod services;
 mod state;
 
 use state::AppState;
-use crate::middleware::auth::auth_middleware;
 use crate::middlewares::admin_auth::admin_auth_middleware;
 
 #[tokio::main]
@@ -130,8 +129,7 @@ async fn main() -> anyhow::Result<()> {
     // Protected auth routes
     let protected_routes = Router::new()
         .route("/auth/me", get(handlers::auth::me))
-        .route("/auth/logout", post(handlers::auth::logout))
-        .layer(from_fn_with_state(state.clone(), auth_middleware));
+        .route("/auth/logout", post(handlers::auth::logout));
 
     // Admin routes (with admin auth middleware)
     let admin_routes = Router::new()

@@ -1,7 +1,7 @@
 // crates/core/src/models.rs
 // Translation of Django models to Rust structs
 
-use chrono::{DateTime, Utc, NaiveDateTime};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
