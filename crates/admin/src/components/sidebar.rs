@@ -6,26 +6,28 @@ pub fn AdminSidebar() -> Element {
     let auth = use_admin_auth();
     let auth_state = auth.read();
 
-    // PURE ROLE-BASED ADMIN CHECK (case-insensitive):
-    // 'admin' or 'superuser' -> Admin dashboard
-    // 'agent' -> Agent dashboard  
-    // 'property_owner' -> Property owner dashboard
+    // Get the uppercase role returned by the backend
     let user_role = auth_state.user.as_ref()
-        .map(|u| u.role.to_lowercase())
+        .map(|u| u.role.to_uppercase())
         .unwrap_or_default();
-    
-    let is_admin = user_role == "admin" || user_role == "superuser";
-    let is_agent = user_role == "agent";
-    let is_property_owner = user_role == "property_owner";
 
-    let role_label = if is_admin { 
-        "Admin" 
-    } else if is_agent { 
-        "Agent" 
-    } else if is_property_owner { 
-        "Property Owner" 
-    } else { 
-        "User" 
+    // Define role-based permissions
+    let is_superuser = user_role == "SUPERUSER";
+    let is_admin = user_role == "ADMIN" || is_superuser;
+    let is_agent = user_role == "AGENT";
+    let is_property_owner = user_role == "PROPERTY_OWNER";
+
+    // Determine the label to show in the sidebar header
+    let role_label = if is_superuser {
+        "Superuser"
+    } else if is_admin {
+        "Admin"
+    } else if is_agent {
+        "Agent"
+    } else if is_property_owner {
+        "Property Owner"
+    } else {
+        "User"
     };
 
     let user_name = auth_state.user.as_ref()
@@ -33,28 +35,34 @@ pub fn AdminSidebar() -> Element {
         .unwrap_or_else(|| "User".to_string());
 
     rsx! {
-        aside { class: "fixed left-0 top-0 h-full w-64 bg-gray-800 border-r border-gray-700 overflow-y-auto",
+        aside { class: "fixed left-0 top-0 h-full w-64 bg-gray-800 border-r border-gray-700 overflow-y-auto z-20",
             div { class: "p-6 border-b border-gray-700",
                 h2 { class: "text-xl font-bold text-white", "Rento {role_label}" }
                 p { class: "text-sm text-gray-400 mt-1", "{user_name}" }
-                p { class: "text-xs text-gray-500 mt-1", "Role: {user_role}" }
+
+                // Debug line: Shows exactly what the backend is sending.
+                // You can remove this once you confirm the roles are working correctly.
+                p { class: "text-[10px] text-gray-500 mt-1 font-mono", "Role: {user_role}" }
             }
+
             nav { class: "p-4 space-y-2",
-                // Common links for everyone
+
+                // 1. COMMON LINKS (Everyone with is_staff=true can see these)
                 SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
                 SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
                 SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "Commissions" }
 
-                // Agent-specific links
-                if is_agent || is_admin {
+                // 2. AGENT SPECIFIC (Agents, Admins, and Superusers can manage leads/conversions)
+                if is_agent || is_admin || is_superuser {
                     SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
                     SidebarLink { to: crate::AdminRoute::ConversionPage, icon: "🤝", label: "Conversion" }
                 }
 
-                // Admin-only links
-                if is_admin {
+                // 3. ADMIN ONLY (Superuser and Admin)
+                // Agents and Property Owners will NOT see this section
+                if is_admin || is_superuser {
                     div { class: "border-t border-gray-700 my-4" }
-                    p { class: "px-4 text-xs text-gray-500 uppercase font-semibold", "Admin Only" }
+                    p { class: "px-4 text-xs text-gray-500 uppercase font-semibold", "Management" }
                     SidebarLink { to: crate::AdminRoute::UsersPage, icon: "👤", label: "Users" }
                     SidebarLink { to: crate::AdminRoute::AgentsPage, icon: "🏢", label: "Agents" }
                     SidebarLink { to: crate::AdminRoute::PropertyOwnersPage, icon: "🏘️", label: "Property Owners" }

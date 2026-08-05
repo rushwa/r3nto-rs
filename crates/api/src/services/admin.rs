@@ -30,13 +30,15 @@ pub async fn check_superuser_exists(db: &rento_core::Database) -> ApiResult<Setu
 }
 
 pub async fn login(db: &rento_core::Database, jwt_secret: &str, req: LoginRequest) -> ApiResult<LoginResponse> {
-    let row: Option<(Uuid, String, String, String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, email, username, password_hash, first_name, last_name, is_superuser FROM account_users WHERE email = $1 AND (is_superuser = true OR role = 'ADMIN' OR is_staff = true)"
+    // 1. Fetch the actual 'role' column from the database
+    let row: Option<(Uuid, String, String, String, String, String, bool, String)> = sqlx::query_as(
+        "SELECT id, email, username, password_hash, first_name, last_name, is_superuser, role::text FROM account_users WHERE email = $1 AND (is_superuser = true OR role = 'ADMIN' OR is_staff = true)"
     )
         .bind(&req.email)
         .fetch_optional(pool(db)).await?;
 
-    let (user_id, email, username, password_hash, first_name, last_name, is_superuser) = match row {
+    // 2. Destructure the new 'db_role' field
+    let (user_id, email, username, password_hash, first_name, last_name, is_superuser, db_role) = match row {
         Some(r) => r,
         None => return Err(ApiError::Unauthorized("Invalid credentials".to_string())),
     };
@@ -49,31 +51,48 @@ pub async fn login(db: &rento_core::Database, jwt_secret: &str, req: LoginReques
         .map_err(|_| ApiError::Unauthorized("Invalid credentials".to_string()))?;
 
     let name = format!("{} {}", first_name, last_name).trim().to_string();
-    let role = if is_superuser { "superuser" } else { "admin" };
+
+    // 3. Use the ACTUAL role from the DB, or SUPERUSER if they are a superuser
+    let actual_role = db_role.to_uppercase();
+    let role = if is_superuser {
+        "SUPERUSER".to_string()
+    } else {
+        actual_role
+    };
 
     let user = AdminUser {
         id: user_id.to_string(),
         email,
         name: if name.is_empty() { username } else { name },
-        role: role.to_string(),
+        role: role, // Now correctly returns "AGENT", "PROPERTY_OWNER", "ADMIN", etc.
     };
+
     let token = generate_token_with_secret(&user, jwt_secret)?;
     Ok(LoginResponse { token, user })
 }
 pub async fn get_current_admin(db: &rento_core::Database, claims: &Claims) -> ApiResult<AdminUser> {
-    let row: (String, String, String, String, bool) = sqlx::query_as(
-        "SELECT id::text, email, username, COALESCE(NULLIF(first_name || ' ' || last_name, ' '), username) as name, is_superuser FROM account_users WHERE id = $1"
+    // Fetch the ACTUAL role from the database, not hardcoded
+    let row: (String, String, String, String, bool, String) = sqlx::query_as(
+        "SELECT id::text, email, username, COALESCE(NULLIF(first_name || ' ' || last_name, ' '), username) as name, is_superuser, role::text FROM account_users WHERE id = $1"
     )
         .bind(Uuid::parse_str(&claims.sub).map_err(|e| ApiError::BadRequest(e.to_string()))?)
         .fetch_one(pool(db)).await?;
 
-    let role = if row.4 { "superuser" } else { "admin" };
+    let is_superuser = row.4;
+    let actual_role = row.5.to_uppercase(); // Get real role: "AGENT", "PROPERTY_OWNER", "ADMIN"
+
+    // Only override to SUPERUSER if they truly are a superuser
+    let role = if is_superuser {
+        "SUPERUSER".to_string()
+    } else {
+        actual_role
+    };
 
     Ok(AdminUser {
         id: row.0,
         email: row.1,
         name: row.3.trim().to_string(),
-        role: role.to_string(),
+        role: role, // Now returns the REAL role
     })
 }
 pub async fn get_stats(db: &rento_core::Database) -> ApiResult<StatsData> {
