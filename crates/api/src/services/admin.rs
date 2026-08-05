@@ -2,6 +2,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
+use rand::Rng;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
 use sqlx::Row;
@@ -237,7 +238,109 @@ pub async fn get_agents(db: &rento_core::Database) -> ApiResult<Vec<Agent>> {
     Ok(rows.into_iter().map(Agent::from).collect())
 }
 
-// ... (keep your existing imports at the top)
+// Add these imports at the top of services/admin.rs if not present:
+
+pub async fn initiate_handshake(db: &rento_core::Database, agent_id: &str, target_user_id: &str) -> ApiResult<()> {
+    let agent_uuid = Uuid::parse_str(agent_id).map_err(|e| ApiError::BadRequest(format!("Invalid Agent UUID: {}", e)))?;
+    let target_uuid = Uuid::parse_str(target_user_id).map_err(|e| ApiError::BadRequest(format!("Invalid User UUID: {}", e)))?;
+
+    // 1. Verify target user exists and is currently a CLIENT
+    let current_role: String = sqlx::query_scalar(
+        "SELECT role::text FROM account_users WHERE id = $1"
+    )
+        .bind(target_uuid)
+        .fetch_one(pool(db))
+        .await
+        .map_err(|_| ApiError::NotFound("User not found".to_string()))?;
+
+    if current_role != "CLIENT" {
+        return Err(ApiError::BadRequest("Target user is not a CLIENT and cannot be converted".to_string()));
+    }
+
+    // 2. Generate 6-digit OTP
+    let otp = format!("{:06}", rand::thread_rng().gen_range(0..999999));
+    let expires_at = Utc::now() + Duration::minutes(15); // OTP valid for 15 mins
+
+    // 3. Save OTP (using email_otps table, assuming email is the primary contact)
+    // Note: In production, you would also trigger the actual Email/SMS service here.
+    let email: String = sqlx::query_scalar("SELECT email FROM account_users WHERE id = $1")
+        .bind(target_uuid)
+        .fetch_one(pool(db))
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO email_otps (email, code, purpose, expires_at, is_used) VALUES ($1, $2, 'ROLE_CONVERSION', $3, false)"
+    )
+        .bind(&email)
+        .bind(&otp)
+        .bind(expires_at)
+        .execute(pool(db))
+        .await?;
+
+    // TODO: Integrate your Email/SMS service here to send the OTP to the user.
+    tracing::info!("HANDSHAKE OTP for user {}: {} (Simulated send)", target_user_id, otp);
+
+    Ok(())
+}
+
+pub async fn verify_handshake(db: &rento_core::Database, agent_id: &str, target_user_id: &str, otp_code: &str) -> ApiResult<()> {
+    let agent_uuid = Uuid::parse_str(agent_id).map_err(|e| ApiError::BadRequest(format!("Invalid Agent UUID: {}", e)))?;
+    let target_uuid = Uuid::parse_str(target_user_id).map_err(|e| ApiError::BadRequest(format!("Invalid User UUID: {}", e)))?;
+
+    // 1. Get user's email to check OTP
+    let email: String = sqlx::query_scalar("SELECT email FROM account_users WHERE id = $1")
+        .bind(target_uuid)
+        .fetch_one(pool(db))
+        .await
+        .map_err(|_| ApiError::NotFound("User not found".to_string()))?;
+
+    // 2. Verify OTP
+    let otp_record: Option<(Uuid, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, is_used, expires_at FROM email_otps WHERE email = $1 AND code = $2 AND purpose = 'ROLE_CONVERSION' ORDER BY created_at DESC LIMIT 1"
+    )
+        .bind(&email)
+        .bind(otp_code)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (otp_id, is_used, expires_at) = match otp_record {
+        Some(record) => record,
+        None => return Err(ApiError::Unauthorized("Invalid OTP code".to_string())),
+    };
+
+    if is_used {
+        return Err(ApiError::BadRequest("This OTP has already been used".to_string()));
+    }
+    if Utc::now() > expires_at {
+        return Err(ApiError::BadRequest("This OTP has expired".to_string()));
+    }
+
+    // 3. Mark OTP as used
+    sqlx::query("UPDATE email_otps SET is_used = true WHERE id = $1")
+        .bind(otp_id)
+        .execute(pool(db))
+        .await?;
+
+    // 4. Promote user to PROPERTY_OWNER
+    sqlx::query("UPDATE account_users SET role = 'PROPERTY_OWNER', updated_at = NOW() WHERE id = $1")
+        .bind(target_uuid)
+        .execute(pool(db))
+        .await?;
+
+    // 5. Record the conversion relationship (enforces "only see owners they converted")
+    // Using INSERT ... ON CONFLICT to handle idempotency if the agent tries again
+    sqlx::query(
+        "INSERT INTO agent_conversions (agent_id, property_owner_id, converted_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (property_owner_id) DO NOTHING"
+    )
+        .bind(agent_uuid)
+        .bind(target_uuid)
+        .execute(pool(db))
+        .await?;
+
+    Ok(())
+}
 
 pub async fn get_properties(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<Property>> {
     let user_id = Uuid::parse_str(&claims.sub)

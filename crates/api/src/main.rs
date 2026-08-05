@@ -146,6 +146,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/properties/:id", get(handlers::admin::get_property_detail))
         // NEW: Route for agent leads
         .route("/admin/leads", get(handlers::admin::get_agent_leads))
+        .route("/admin/agents/handshake/initiate", post(handlers::admin::initiate_handshake))
+        .route("/admin/agents/handshake/verify", post(handlers::admin::verify_handshake))
         .route("/admin/subscriptions/plans", get(handlers::admin::get_subscription_plans))
         .route("/admin/commissions", get(handlers::admin::get_commissions))
         .route("/admin/inquiries", get(handlers::admin::get_inquiries))

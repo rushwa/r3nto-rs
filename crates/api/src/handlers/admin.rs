@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, State},
     Extension, Json,
 };
+use serde::Deserialize;
 use axum::http::StatusCode;
 use crate::errors::{ApiError, ApiResult};
 use crate::models::analytics::{MarketTrend, SalesData, StatsData, SystemSettings, TopAgent};
@@ -55,6 +56,51 @@ pub async fn get_agents(
 ) -> ApiResult<Json<Vec<Agent>>> {
     let agents = admin_service::get_agents(&state.db).await?;
     Ok(Json(agents))
+}
+
+
+#[derive(Deserialize)]
+pub struct HandshakeInitiateRequest {
+    pub target_user_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct HandshakeVerifyRequest {
+    pub target_user_id: String,
+    pub otp_code: String,
+}
+
+pub async fn initiate_handshake(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<HandshakeInitiateRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Ensure only agents or admins can initiate
+    if claims.role.to_uppercase() != "AGENT" && claims.role.to_uppercase() != "ADMIN" {
+        return Err(ApiError::Unauthorized("Only Agents or Admins can initiate handshakes".to_string()));
+    }
+
+    admin_service::initiate_handshake(&state.db, &claims.sub, &req.target_user_id).await?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Handshake OTP sent successfully to the user's registered contact."
+    })))
+}
+
+pub async fn verify_handshake(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<HandshakeVerifyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "AGENT" && claims.role.to_uppercase() != "ADMIN" {
+        return Err(ApiError::Unauthorized("Only Agents or Admins can verify handshakes".to_string()));
+    }
+
+    admin_service::verify_handshake(&state.db, &claims.sub, &req.target_user_id, &req.otp_code).await?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Digital Handshake successful. User is now a Property Owner."
+    })))
 }
 
 // Update the existing get_properties handler:
