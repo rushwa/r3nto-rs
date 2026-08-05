@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/users", get(handlers::admin::get_users))
         .route("/admin/agents", get(handlers::admin::get_agents))
         // NOTE: Ensure handlers::admin::get_properties accepts Extension(claims): Extension<Claims>
-        .route("/admin/properties", get(handlers::admin::get_properties))
+        .route("/admin/properties", get(handlers::admin::get_properties).post(handlers::admin::create_property))
         .route("/admin/properties/:id", get(handlers::admin::get_property_detail))
         // NEW: Route for agent leads
         .route("/admin/leads", get(handlers::admin::get_agent_leads))

@@ -1,136 +1,162 @@
 use dioxus::prelude::*;
-use crate::api::admin::{get_property_detail, PropertyDetail};
 use crate::components::sidebar::{PageHeader, StatusBadge};
 use crate::context::admin_auth::use_admin_auth;
+use crate::api::admin::{get_property_detail, PropertyDetail};
 
 #[component]
 pub fn PropertyDetailPage(id: String) -> Element {
     let auth = use_admin_auth();
     let token = auth.read().token.clone().unwrap_or_default();
-    let prop_id = id.clone();
 
-    let property = use_resource(move || {
-        let t = token.clone();
-        let pid = prop_id.clone();
-        async move {
-            if t.is_empty() {
-                return Ok(None::<PropertyDetail>);
-            }
+    let mut property = use_signal(|| Option::<PropertyDetail>::None);
+    let mut loading = use_signal(|| true);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    let property_id = id.clone();
+    let effect_token = token.clone();
+
+    use_effect(move || {
+        let t = effect_token.clone();
+        let pid = property_id.clone();
+        spawn(async move {
             match get_property_detail(&t, &pid).await {
-                Ok(p) => Ok(Some(p)),
-                Err(e) => Err(e),
+                Ok(detail) => property.set(Some(detail)),
+                Err(e) => error.set(Some(format!("Failed to load: {}", e))),
             }
-        }
+            loading.set(false);
+        });
     });
-
-    let prop_ref = property.read();
-    let prop_data = match prop_ref.as_ref() {
-        Some(Ok(Some(d))) => Some(d.clone()),
-        _ => None,
-    };
 
     rsx! {
         div { class: "space-y-6",
-            if let Some(p) = &prop_data {
-                PageHeader {
-                    title: p.title.clone(),
-                    subtitle: format!("{} • Listed {}", p.location, p.listing_date)
+            if *loading.read() {
+                div { class: "text-center py-12",
+                    p { class: "text-gray-400", "Loading property details..." }
                 }
+            } else if let Some(err) = error.read().as_ref() {
+                div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-6",
+                    p { class: "text-red-400", "{err}" }
+                }
+            } else if let Some(prop) = property.read().as_ref() {
+                // Header
+                div { class: "flex items-start justify-between",
+                    div {
+                        PageHeader {
+                            title: prop.title.clone(),
+                            subtitle: format!("Listed on {}", prop.listing_date)
+                        }
+                    }
+                    StatusBadge { status: prop.status.clone() }
+                }
+
+                // Main Content Grid
                 div { class: "grid grid-cols-1 lg:grid-cols-3 gap-6",
+                    // Left Column - Images and Details
                     div { class: "lg:col-span-2 space-y-6",
+                        // Image Gallery
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 overflow-hidden",
-                            div { class: "h-64 bg-gray-700 flex items-center justify-center text-6xl", "🏠" }
-                            if !p.images.is_empty() {
-                                div { class: "p-3 flex gap-2 overflow-x-auto",
-                                    for _img in p.images.iter() {
-                                        div { class: "w-20 h-20 bg-gray-700 rounded flex-shrink-0 flex items-center justify-center text-2xl", "🏠" }
+                            if prop.images.is_empty() {
+                                div { class: "h-96 bg-gradient-to-br from-blue-600/20 to-purple-600/20 flex items-center justify-center",
+                                    span { class: "text-8xl", "🏠" }
+                                }
+                            } else {
+                                div { class: "h-96 bg-gray-900 flex items-center justify-center",
+                                    img {
+                                        src: "{prop.images[0]}",
+                                        class: "max-h-full object-contain",
+                                        alt: "{prop.title}"
                                     }
                                 }
                             }
                         }
-                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
-                            h3 { class: "text-white font-semibold mb-3", "Property Details" }
-                            div { class: "grid grid-cols-2 md:grid-cols-4 gap-4",
-                                div { class: "text-center p-3 bg-gray-900 rounded-lg",
-                                    p { class: "text-2xl font-bold text-white", "{p.bedrooms}" }
-                                    p { class: "text-gray-500 text-xs", "Bedrooms" }
-                                }
-                                div { class: "text-center p-3 bg-gray-900 rounded-lg",
-                                    p { class: "text-2xl font-bold text-white", "{p.bathrooms}" }
-                                    p { class: "text-gray-500 text-xs", "Bathrooms" }
-                                }
-                                div { class: "text-center p-3 bg-gray-900 rounded-lg",
-                                    p { class: "text-2xl font-bold text-white", "{p.area_sqft}" }
-                                    p { class: "text-gray-500 text-xs", "Sq Ft" }
-                                }
-                                div { class: "text-center p-3 bg-gray-900 rounded-lg",
-                                    p { class: "text-2xl font-bold text-white", "${p.price as i64}" }
-                                    p { class: "text-gray-500 text-xs", "Price" }
+
+                        // Description
+                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                            h3 { class: "text-lg font-semibold text-white mb-3", "Description" }
+                            p { class: "text-gray-300 leading-relaxed", "{prop.description}" }
+                        }
+
+                        // Features
+                        if !prop.features.is_empty() {
+                            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                                h3 { class: "text-lg font-semibold text-white mb-3", "Features" }
+                                div { class: "flex flex-wrap gap-2",
+                                    for feature in prop.features.iter() {
+                                        span { class: "px-3 py-1 bg-blue-600/20 text-blue-400 rounded-full text-sm", "{feature}" }
+                                    }
                                 }
                             }
-                            div { class: "mt-4",
-                                h4 { class: "text-sm font-medium text-gray-400 mb-2", "Description" }
-                                p { class: "text-gray-300 text-sm leading-relaxed", "{p.description}" }
+                        }
+                    }
+
+                    // Right Column - Key Info
+                    div { class: "space-y-6",
+                        // Price Card
+                        div { class: "bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg p-6",
+                            p { class: "text-blue-100 text-sm mb-1", "Asking Price" }
+                            p { class: "text-4xl font-bold text-white", "KES {prop.price as i64}" }
+                        }
+
+                        // Property Specs
+                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                            h3 { class: "text-lg font-semibold text-white mb-4", "Property Details" }
+                            div { class: "space-y-3",
+                                div { class: "flex items-center justify-between",
+                                    span { class: "text-gray-400", "Type" }
+                                    span { class: "text-white font-medium", "{prop.property_type}" }
+                                }
+                                div { class: "flex items-center justify-between",
+                                    span { class: "text-gray-400", "Bedrooms" }
+                                    span { class: "text-white font-medium", "{prop.bedrooms}" }
+                                }
+                                div { class: "flex items-center justify-between",
+                                    span { class: "text-gray-400", "Bathrooms" }
+                                    span { class: "text-white font-medium", "{prop.bathrooms}" }
+                                }
+                                div { class: "flex items-center justify-between",
+                                    span { class: "text-gray-400", "Area" }
+                                    span { class: "text-white font-medium", "{prop.area_sqft} sqft" }
+                                }
+                                div { class: "flex items-center justify-between",
+                                    span { class: "text-gray-400", "Location" }
+                                    span { class: "text-white font-medium text-right", "{prop.location}" }
+                                }
                             }
-                            if !p.features.is_empty() {
-                                div { class: "mt-4",
-                                    h4 { class: "text-sm font-medium text-gray-400 mb-2", "Features" }
-                                    div { class: "flex flex-wrap gap-2",
-                                        for feature in p.features.iter() {
-                                            span { class: "px-2.5 py-1 bg-gray-900 rounded text-xs text-gray-300 border border-gray-700", "{feature}" }
+                        }
+
+                        // Owner Info
+                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                            h3 { class: "text-lg font-semibold text-white mb-4", "Property Owner" }
+                            div { class: "space-y-2",
+                                div { class: "flex items-center gap-3",
+                                    div { class: "w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full flex items-center justify-center",
+                                        span { class: "text-white font-bold text-lg",
+                                            "{prop.owner.name.chars().next().unwrap_or('?')}"
                                         }
                                     }
+                                    div {
+                                        p { class: "text-white font-medium", "{prop.owner.name}" }
+                                        p { class: "text-gray-400 text-sm", "{prop.owner.email}" }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Stats
+                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                            h3 { class: "text-lg font-semibold text-white mb-4", "Listing Stats" }
+                            div { class: "grid grid-cols-2 gap-4",
+                                div { class: "text-center",
+                                    p { class: "text-2xl font-bold text-blue-400", "{prop.views}" }
+                                    p { class: "text-gray-400 text-sm", "Views" }
+                                }
+                                div { class: "text-center",
+                                    p { class: "text-2xl font-bold text-green-400", "{prop.inquiries}" }
+                                    p { class: "text-gray-400 text-sm", "Inquiries" }
                                 }
                             }
                         }
                     }
-                    div { class: "space-y-6",
-                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
-                            h3 { class: "text-white font-semibold mb-3", "Status" }
-                            div { class: "flex items-center justify-between",
-                                StatusBadge { status: p.status.clone() }
-                                span { class: "text-gray-400 text-sm", "{p.views} views" }
-                            }
-                            div { class: "mt-3 pt-3 border-t border-gray-700",
-                                div { class: "flex justify-between text-sm",
-                                    span { class: "text-gray-400", "Inquiries" }
-                                    span { class: "text-white font-medium", "{p.inquiries}" }
-                                }
-                            }
-                        }
-                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
-                            h3 { class: "text-white font-semibold mb-3", "Owner" }
-                            div { class: "flex items-center gap-3",
-                                div { class: "w-10 h-10 rounded-full bg-gray-700 flex items-center justify-center text-white font-bold",
-                                    {p.owner.name.chars().next().unwrap_or('?').to_string()}
-                                }
-                                div {
-                                    p { class: "text-white text-sm font-medium", "{p.owner.name}" }
-                                    p { class: "text-gray-500 text-xs", "{p.owner.email}" }
-                                    p { class: "text-gray-500 text-xs", "{p.owner.role}" }
-                                }
-                            }
-                        }
-                        div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
-                            h3 { class: "text-white font-semibold mb-3", "Actions" }
-                            div { class: "space-y-2",
-                                button { class: "w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-colors", "Edit Property" }
-                                button { class: "w-full py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm transition-colors", "Mark as Sold" }
-                                button { class: "w-full py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded text-sm transition-colors", "Delete Property" }
-                            }
-                        }
-                    }
-                }
-            } else if prop_ref.as_ref().is_none() || matches!(prop_ref.as_ref(), Some(Ok(None))) {
-                div { class: "flex items-center justify-center py-20",
-                    div { class: "animate-pulse flex flex-col items-center",
-                        div { class: "w-12 h-12 bg-gray-700 rounded-lg mb-4" }
-                        div { class: "h-4 bg-gray-700 rounded w-32" }
-                    }
-                }
-            } else {
-                div { class: "bg-gray-800 rounded-lg border border-gray-700 p-8 text-center",
-                    p { class: "text-red-400", "Failed to load property details" }
                 }
             }
         }

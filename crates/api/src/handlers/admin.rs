@@ -4,6 +4,7 @@ use axum::{
 };
 use serde::Deserialize;
 use axum::http::StatusCode;
+use uuid::Uuid;
 use crate::errors::{ApiError, ApiResult};
 use crate::models::analytics::{MarketTrend, SalesData, StatsData, SystemSettings, TopAgent};
 use crate::models::commission::Commission;
@@ -75,15 +76,15 @@ pub async fn initiate_handshake(
     Extension(claims): Extension<Claims>,
     Json(req): Json<HandshakeInitiateRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Ensure only agents or admins can initiate
-    if claims.role.to_uppercase() != "AGENT" && claims.role.to_uppercase() != "ADMIN" {
+    let role_upper = claims.role.to_uppercase();
+    if role_upper != "AGENT" && role_upper != "ADMIN" && role_upper != "SUPERUSER" {
         return Err(ApiError::Unauthorized("Only Agents or Admins can initiate handshakes".to_string()));
     }
 
     admin_service::initiate_handshake(&state.db, &claims.sub, &req.target_user_id).await?;
 
     Ok(Json(serde_json::json!({
-        "message": "Handshake OTP sent successfully to the user's registered contact."
+        "message": "Handshake OTP sent successfully to the user's registered email."
     })))
 }
 
@@ -92,7 +93,8 @@ pub async fn verify_handshake(
     Extension(claims): Extension<Claims>,
     Json(req): Json<HandshakeVerifyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if claims.role.to_uppercase() != "AGENT" && claims.role.to_uppercase() != "ADMIN" {
+    let role_upper = claims.role.to_uppercase();
+    if role_upper != "AGENT" && role_upper != "ADMIN" && role_upper != "SUPERUSER" {
         return Err(ApiError::Unauthorized("Only Agents or Admins can verify handshakes".to_string()));
     }
 
@@ -102,7 +104,6 @@ pub async fn verify_handshake(
         "message": "Digital Handshake successful. User is now a Property Owner."
     })))
 }
-
 // Update the existing get_properties handler:
 pub async fn get_properties(
     State(state): State<AppState>,
@@ -243,4 +244,61 @@ pub async fn create_user(
 ) -> ApiResult<StatusCode> {
     admin_service::create_user(&state.db, &req).await?;
     Ok(StatusCode::CREATED)  // 201 with empty body
+}
+
+
+
+
+// Add this request struct and handler function:
+#[derive(serde::Deserialize)]
+pub struct CreatePropertyRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub price: f64,
+    pub property_type: String,
+    pub location: String,
+    pub county: Option<String>,
+}
+
+pub async fn create_property(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CreatePropertyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let role_upper = claims.role.to_uppercase();
+    let is_owner_or_admin = role_upper == "PROPERTY_OWNER"
+        || role_upper == "ADMIN"
+        || role_upper == "SUPERUSER";
+
+    if !is_owner_or_admin {
+        return Err(ApiError::Unauthorized("Only Property Owners or Admins can create properties".to_string()));
+    }
+
+    let owner_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    let property_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO properties (id, title, description, price, property_type, location, county, owner_id, status, created_at)
+        VALUES ($1, $2, $3, $4, $5::text::property_type, $6, $7, $8, 'available', NOW())
+        "#
+    )
+        .bind(property_id)
+        .bind(&req.title)
+        .bind(&req.description)
+        .bind(req.price)
+        .bind(&req.property_type)
+        .bind(&req.location)
+        .bind(&req.county)
+        .bind(owner_id)
+        .execute(&state.db.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create property: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "id": property_id.to_string(),
+        "message": "Property created successfully"
+    })))
 }

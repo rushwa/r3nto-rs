@@ -1,4 +1,3 @@
-// crates/api/src/middlewares/admin_auth.rs
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
@@ -42,17 +41,41 @@ pub async fn admin_auth_middleware(
         Err(_) => return Err(StatusCode::UNAUTHORIZED),
     };
 
-    // FIX: Case-insensitive role check to match the uppercase roles from the backend
     let role_upper = claims.role.to_uppercase();
-    if role_upper != "ADMIN" && role_upper != "SUPERUSER" {
+    let is_admin_or_superuser = role_upper == "ADMIN" || role_upper == "SUPERUSER";
+    let is_agent = role_upper == "AGENT";
+    let is_property_owner = role_upper == "PROPERTY_OWNER";
+
+    // Define routes that agents are explicitly allowed to access
+    // Using starts_with() to match both list routes (/admin/properties) and detail routes (/admin/properties/:id)
+    let is_agent_allowed_route = path == "/admin/me"
+        || path.starts_with("/admin/properties")
+        || path == "/admin/leads"
+        || path == "/admin/commissions"
+        || path.starts_with("/admin/agents/handshake/");
+
+    // Define routes that property owners are explicitly allowed to access
+    let is_property_owner_allowed_route = path == "/admin/me"
+        || path.starts_with("/admin/properties")
+        || path == "/admin/commissions";
+
+    // Authorization Logic:
+    // - Admins/Superusers can access everything.
+    // - Agents can ONLY access their specific allowed routes.
+    // - Property Owners can ONLY access their specific allowed routes.
+    if !is_admin_or_superuser
+        && !(is_agent && is_agent_allowed_route)
+        && !(is_property_owner && is_property_owner_allowed_route)
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Only superusers can grant privileges
+    // Extra security: Only superusers can grant privileges
     if path == "/admin/grant-privileges" && role_upper != "SUPERUSER" {
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // Pass the claims to the handler
     request.extensions_mut().insert(claims);
     Ok(next.run(request).await)
 }

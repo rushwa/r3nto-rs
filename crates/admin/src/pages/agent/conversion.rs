@@ -1,155 +1,147 @@
 use dioxus::prelude::*;
-use serde::Deserialize;
-use crate::api::{api_get, api_post_status};
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct ClientUser {
-    pub id: String,
-    pub email: String,
-    pub full_name: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct UsersResponse {
-    pub users: Vec<ClientUser>,
-}
+use crate::components::sidebar::PageHeader;
+use crate::context::admin_auth::use_admin_auth;
+use crate::api::admin::{initiate_handshake, verify_handshake};
 
 #[component]
 pub fn ConversionPage() -> Element {
-    let mut step = use_signal(|| 1u8);
-    let mut selected_id = use_signal(String::new);
-    let mut selected_email = use_signal(String::new);
-    let mut selected_name = use_signal(String::new);
-    let mut otp = use_signal(String::new);
+    let auth = use_admin_auth();
+    let token = auth.read().token.clone().unwrap_or_default();
+
+    let mut target_user_id = use_signal(|| String::new());
+    let mut otp_code = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
-    let mut message = use_signal(String::new);
-    
-    let clients = use_resource(move || async move {
-        api_get::<UsersResponse>("/api/users?role=client").await
-    });
+    let mut message = use_signal(|| Option::<String>::None);
+    let mut is_error = use_signal(|| false);
 
-    let initiate = move |id: String, email: String, name: String| {
-        spawn(async move {
-            loading.set(true);
-            let body = serde_json::json!({ "user_id": id });
-            if api_post_status("/api/conversion/initiate", &body).await {
-                selected_id.set(id);
-                selected_email.set(email);
-                selected_name.set(name);
-                step.set(2);
-                message.set("OTP sent to client's email".to_string());
-            } else {
-                message.set("Failed to send OTP".to_string());
-            }
-            loading.set(false);
-        });
-    };
-
-    let verify = move |_| {
-        spawn(async move {
-            loading.set(true);
-            let body = serde_json::json!({
-                "user_id": selected_id(),
-                "otp": otp(),
-                "referring_agent_id": "current_agent_id"
-            });
-            if api_post_status("/api/conversion/verify", &body).await {
-                step.set(3);
-                message.set("Client converted to Property Owner!".to_string());
-            } else {
-                message.set("Invalid or expired OTP".to_string());
-            }
-            loading.set(false);
-        });
-    };
-
-    rsx! {
-        div { class: "space-y-6",
-            h1 { class: "text-3xl font-bold", "Digital Handshake - Role Conversion" }
-            p { class: "text-gray-400", "Convert a client to a property owner" }
-            
-            div { class: "flex gap-4 mb-6",
-                StepIndicator { num: "1", label: "Select Client", active: step() >= 1 }
-                StepIndicator { num: "2", label: "Verify OTP", active: step() >= 2 }
-                StepIndicator { num: "3", label: "Complete", active: step() >= 3 }
-            }
-            
-            if !message.read().is_empty() {
-                div { class: "bg-blue-900 border border-blue-700 text-blue-300 px-4 py-3 rounded-lg", "{message}" }
-            }
-            
-            match step() {
-                1 => rsx! {
-                    div { class: "bg-gray-800 rounded-lg p-6",
-                        h2 { class: "text-xl font-bold mb-4", "Select Client to Convert" }
-                        match &*clients.read() {
-                            Some(Some(data)) => rsx! {
-                                div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
-                                    for client in &data.users {
-                                        div { class: "bg-gray-700 rounded-lg p-4", key: "{client.id}",
-                                            h3 { class: "text-lg font-bold", "{client.full_name}" }
-                                            p { class: "text-gray-400", "{client.email}" }
-                                            button {
-                                                class: "mt-3 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg",
-                                                disabled: loading(),
-                                                onclick: {
-                                                    let id = client.id.clone();
-                                                    let email = client.email.clone();
-                                                    let name = client.full_name.clone();
-                                                    move |_| initiate(id.clone(), email.clone(), name.clone())
-                                                },
-                                                "Send OTP"
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            _ => rsx! { p { class: "text-gray-400", "Loading clients..." } }
-                        }
-                    }
-                },
-                2 => rsx! {
-                    div { class: "bg-gray-800 rounded-lg p-6",
-                        h2 { class: "text-xl font-bold mb-4", "Enter OTP" }
-                        p { class: "text-gray-400 mb-4", "OTP sent to {selected_email}" }
-                        form { onsubmit: verify,
-                            div { class: "mb-4",
-                                label { class: "block text-sm text-gray-300 mb-1", "6-Digit OTP" }
-                                input { class: "w-full bg-gray-700 px-3 py-2 rounded-lg", r#type: "text",
-                                    maxlength: "6", required: true,
-                                    oninput: move |e| otp.set(e.value()) }
-                            }
-                            button { r#type: "submit", class: "bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg",
-                                disabled: loading(),
-                                if loading() { "Verifying..." } else { "Verify & Convert" } }
-                        }
-                    }
-                },
-                3 => rsx! {
-                    div { class: "bg-gray-800 rounded-lg p-6 text-center",
-                        div { class: "text-6xl mb-4", "✅" }
-                        h2 { class: "text-2xl font-bold mb-2", "Conversion Complete!" }
-                        p { class: "text-gray-400 mb-6", "{selected_name} is now a Property Owner" }
-                        button { class: "bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg",
-                            onclick: move |_| { step.set(1); message.set(String::new()); },
-                            "Convert Another" }
-                    }
-                },
-                _ => rsx! {}
-            }
+    let handle_initiate = move |_| {
+        if target_user_id.read().is_empty() {
+            message.set(Some("Please enter the user's UUID or Email".to_string()));
+            is_error.set(true);
+            return;
         }
-    }
-}
+        loading.set(true);
+        message.set(None);
 
-#[component]
-fn StepIndicator(num: String, label: String, active: bool) -> Element {
-    let bg = if active { "bg-blue-600" } else { "bg-gray-700" };
-    let text = if active { "text-white" } else { "text-gray-400" };
+        let t = token.clone();
+        let uid = target_user_id.read().clone();
+
+        spawn(async move {
+            match initiate_handshake(&t, &uid).await {
+                Ok(_) => {
+                    message.set(Some("✅ OTP sent! Ask the owner for the 6-digit code from their email.".to_string()));
+                    is_error.set(false);
+                }
+                Err(e) => {
+                    message.set(Some(format!("Failed: {}", e)));
+                    is_error.set(true);
+                }
+            }
+            loading.set(false);
+        });
+    };
+
+    let handle_verify = move |_| {
+        if otp_code.read().len() != 6 {
+            message.set(Some("OTP must be exactly 6 digits".to_string()));
+            is_error.set(true);
+            return;
+        }
+        loading.set(true);
+        message.set(None);
+
+        let t = token.clone();
+        let uid = target_user_id.read().clone();
+        let code = otp_code.read().clone();
+
+        spawn(async move {
+            match verify_handshake(&t, &uid, &code).await {
+                Ok(_) => {
+                    message.set(Some("🎉 Digital Handshake Complete! User is now a Property Owner.".to_string()));
+                    is_error.set(false);
+                    target_user_id.set("".to_string());
+                    otp_code.set("".to_string());
+                }
+                Err(e) => {
+                    message.set(Some(format!("Verification Failed: {}", e)));
+                    is_error.set(true);
+                }
+            }
+            loading.set(false);
+        });
+    };
+
     rsx! {
-        div { class: "flex-1 bg-gray-800 rounded-lg p-4",
-            div { class: "flex items-center gap-2",
-                div { class: "w-8 h-8 rounded-full {bg} flex items-center justify-center font-bold {text}", "{num}" }
-                span { class: "{text}", "{label}" }
+        div { class: "space-y-6 max-w-2xl",
+            PageHeader {
+                title: "Digital Handshake".to_string(),
+                subtitle: "Convert clients to Property Owners securely".to_string()
+            }
+
+            div { class: "bg-blue-900/20 border border-blue-500/30 rounded-lg p-4",
+                div { class: "flex gap-3",
+                    span { class: "text-2xl", "🛡️" }
+                    div {
+                        h4 { class: "text-blue-400 font-semibold", "The Handshake Protocol" }
+                        p { class: "text-gray-300 text-sm mt-1",
+                            "Explain to the owner that this code acts as their 'Digital Title Deed Protection'. "
+                            "Once they provide the 6-digit code sent to their email, you are legally authorized to manage their property."
+                        }
+                    }
+                }
+            }
+
+            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6 space-y-4",
+                div {
+                    label { class: "block text-sm font-medium text-gray-400 mb-1", "Owner's User ID (UUID) or Email" }
+                    input {
+                        class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500",
+                        r#type: "text",
+                        placeholder: "e.g., 550e8400-e29b-41d4-a716-446655440000",
+                        value: "{target_user_id}",
+                        oninput: move |evt| target_user_id.set(evt.value()),
+                    }
+                }
+
+                button {
+                    class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50",
+                    disabled: *loading.read(),
+                    onclick: handle_initiate,
+                    if *loading.read() { "Sending..." } else { "Send Handshake OTP" }
+                }
+
+                div { class: "border-t border-gray-700 my-4" }
+
+                div {
+                    label { class: "block text-sm font-medium text-gray-400 mb-1", "6-Digit Verification Code" }
+                    input {
+                        class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-center text-2xl tracking-widest focus:outline-none focus:border-green-500",
+                        r#type: "text",
+                        placeholder: "000000",
+                        maxlength: "6",
+                        value: "{otp_code}",
+                        oninput: move |evt| {
+                            let val = evt.value();
+                            if val.chars().all(|c| c.is_ascii_digit()) && val.len() <= 6 {
+                                otp_code.set(val);
+                            }
+                        },
+                    }
+                }
+
+                button {
+                    class: "w-full py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50",
+                    disabled: *loading.read() || otp_code.read().len() != 6,
+                    onclick: handle_verify,
+                    if *loading.read() { "Verifying..." } else { "Complete Digital Handshake" }
+                }
+
+                if let Some(msg) = message.read().as_ref() {
+                    p {
+                        class: if *is_error.read() { "text-red-400 text-sm text-center" } else { "text-green-400 text-sm text-center" },
+                        "{msg}"
+                    }
+                }
             }
         }
     }

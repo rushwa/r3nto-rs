@@ -52,7 +52,7 @@ pub struct Agent {
     pub commission_rate: f64,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct Property {
     pub id: String,
     pub title: String,
@@ -67,25 +67,25 @@ pub struct Property {
     pub created_at: String,
 }
 
-#[derive(Deserialize, Clone, Debug)]
-pub struct PropertyDetail {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub price: f64,
-    pub status: String,
-    pub owner: User,
-    pub location: String,
-    pub property_type: String,
-    pub bedrooms: u32,
-    pub bathrooms: u32,
-    pub area_sqft: u32,
-    pub features: Vec<String>,
-    pub images: Vec<String>,
-    pub listing_date: String,
-    pub views: u32,
-    pub inquiries: u32,
-}
+// #[derive(Deserialize, Clone, Debug)]
+// pub struct PropertyDetail {
+//     pub id: String,
+//     pub title: String,
+//     pub description: String,
+//     pub price: f64,
+//     pub status: String,
+//     pub owner: User,
+//     pub location: String,
+//     pub property_type: String,
+//     pub bedrooms: u32,
+//     pub bathrooms: u32,
+//     pub area_sqft: u32,
+//     pub features: Vec<String>,
+//     pub images: Vec<String>,
+//     pub listing_date: String,
+//     pub views: u32,
+//     pub inquiries: u32,
+// }
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct StatsData {
@@ -235,6 +235,33 @@ pub async fn grant_admin_privileges(token: &str, req: &GrantPrivilegesRequest) -
     Ok(())
 }
 
+pub async fn initiate_handshake(token: &str, target_user_id: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req { target_user_id: String }
+
+    let body = serde_json::to_string(&Req { target_user_id: target_user_id.to_string() })
+        .map_err(|e| e.to_string())?;
+
+    let _: serde_json::Value = fetch_json("/admin/agents/handshake/initiate", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+
+pub async fn verify_handshake(token: &str, target_user_id: &str, otp_code: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req {
+        target_user_id: String,
+        otp_code: String
+    }
+
+    let body = serde_json::to_string(&Req {
+        target_user_id: target_user_id.to_string(),
+        otp_code: otp_code.to_string()
+    }).map_err(|e| e.to_string())?;
+
+    let _: serde_json::Value = fetch_json("/admin/agents/handshake/verify", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+
 async fn fetch_json<T: serde::de::DeserializeOwned>(
     path: &str,
     method: &str,
@@ -322,9 +349,9 @@ pub async fn get_properties(token: &str) -> Result<Vec<Property>, String> {
     fetch_json("/admin/properties", "GET", Some(token), None).await
 }
 
-pub async fn get_property_detail(token: &str, id: &str) -> Result<PropertyDetail, String> {
-    fetch_json(&format!("/admin/properties/{}", id), "GET", Some(token), None).await
-}
+// pub async fn get_property_detail(token: &str, id: &str) -> Result<PropertyDetail, String> {
+//     fetch_json(&format!("/admin/properties/{}", id), "GET", Some(token), None).await
+// }
 
 pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
     fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
@@ -370,4 +397,52 @@ pub async fn get_settings(token: &str) -> Result<SystemSettings, String> {
 pub async fn update_settings(token: &str, settings: &SystemSettings) -> Result<(), String> {
     let body = serde_json::to_string(settings).map_err(|e| e.to_string())?;
     fetch_json("/admin/settings", "POST", Some(token), Some(body)).await
+}
+
+#[derive(Serialize)]
+pub struct CreatePropertyRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub price: f64,
+    pub property_type: String,
+    pub location: String,
+    pub county: Option<String>,
+}
+
+pub async fn create_property(token: &str, req: &CreatePropertyRequest) -> Result<String, String> {
+    let body = serde_json::to_string(req).map_err(|e| e.to_string())?;
+    let resp: serde_json::Value = fetch_json("/admin/properties", "POST", Some(token), Some(body)).await?;
+    Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct PropertyOwner {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct PropertyDetail {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub price: f64,
+    pub status: String,
+    pub owner: PropertyOwner,
+    pub location: String,
+    pub property_type: String,
+    pub bedrooms: u32,
+    pub bathrooms: u32,
+    pub area_sqft: u32,
+    pub features: Vec<String>,
+    pub images: Vec<String>,
+    pub listing_date: String,
+    pub views: u32,
+    pub inquiries: u32,
+}
+
+pub async fn get_property_detail(token: &str, property_id: &str) -> Result<PropertyDetail, String> {
+    fetch_json(&format!("/admin/properties/{}", property_id), "GET", Some(token), None).await
 }
