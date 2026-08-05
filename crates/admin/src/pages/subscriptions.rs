@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-
 use crate::api::admin::{get_subscription_plans, SubscriptionPlan};
 use crate::components::sidebar::PageHeader;
 use crate::context::admin_auth::use_admin_auth;
@@ -12,7 +11,7 @@ pub fn SubscriptionsPage() -> Element {
 
     let plans = use_resource(move || {
         let t = token_for_resource.clone();
-        async move {
+        async move {                              // <-- removed -> Result<...>
             if t.is_empty() {
                 return Ok(vec![
                     SubscriptionPlan {
@@ -43,7 +42,7 @@ pub fn SubscriptionsPage() -> Element {
     });
 
     let plans_ref = plans.read();
-    let plans_data = match plans_ref.as_ref() {
+    let plans_data: Option<Vec<SubscriptionPlan>> = match plans_ref.as_ref() {
         Some(Ok(d)) => Some(d.clone()),
         _ => None,
     };
@@ -52,7 +51,7 @@ pub fn SubscriptionsPage() -> Element {
         div { class: "space-y-6",
             PageHeader { title: "Subscriptions".to_string(), subtitle: "Manage subscription plans and pricing".to_string() }
 
-            if let Some(data) = &plans_data {
+            if let Some(data) = plans_data.as_ref() {
                 div { class: "grid grid-cols-1 md:grid-cols-3 gap-6",
                     for plan in data.iter() {
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
@@ -62,7 +61,7 @@ pub fn SubscriptionsPage() -> Element {
                                     "{plan.subscribers} subscribers"
                                 }
                             }
-                            p { class: "text-3xl font-bold text-white mb-1", "${plan.price:.2}" }
+                            p { class: "text-3xl font-bold text-white mb-1", "${plan.price as i64}" }
                             p { class: "text-gray-500 text-sm mb-6", "per month" }
                             ul { class: "space-y-3 mb-6",
                                 for feature in plan.features.iter() {

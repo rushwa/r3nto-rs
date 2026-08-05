@@ -103,7 +103,7 @@ fn UserRow(
             td { class: "px-6 py-4",
                 span {
                     class: if is_active { "text-green-400" } else { "text-red-400" },
-                    if is_active { "Active" } else { "Disabled" }
+                    {if is_active { "Active" } else { "Disabled" }}  // <-- braces
                 }
             }
             td { class: "px-6 py-4",
@@ -126,7 +126,7 @@ fn UserRow(
                                 "px-3 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded transition-colors"
                             },
                             onclick: toggle_active,
-                            if is_active { "Disable" } else { "Enable" }
+                            {if is_active { "Disable" } else { "Enable" }}  // <-- braces
                         }
                     }
                 }
@@ -199,7 +199,7 @@ pub fn UsersPage() -> Element {
 
     let mut users = use_signal(Vec::<AdminUser>::new);
     let mut loading = use_signal(|| true);
-    let mut error = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);  // <-- fixed: added closure
     let mut show_create_modal = use_signal(|| false);
 
     let mut new_email = use_signal(|| String::new());

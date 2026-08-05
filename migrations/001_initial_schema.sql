@@ -2,21 +2,69 @@
 -- RentoLink Database Schema (PostgreSQL)
 
 -- Create custom types
-CREATE TYPE user_role AS ENUM ('ADMIN', 'AGENT', 'PROPERTY_OWNER', 'CLIENT');
-CREATE TYPE commission_status AS ENUM ('PENDING', 'APPROVED', 'PAID');
-CREATE TYPE verification_purpose AS ENUM ('REGISTRATION', 'PASSWORD_RESET', 'PHONE_UPDATE');
-CREATE TYPE property_type AS ENUM ('apartment', 'house', 'commercial', 'land');
-CREATE TYPE property_status AS ENUM ('available', 'occupied', 'maintenance');
-CREATE TYPE subscription_status AS ENUM ('pending', 'active', 'inactive', 'expired', 'cancelled', 'trial');
-CREATE TYPE unit_type AS ENUM ('single', 'double', 'bedsitter', '1bed', '2bed', '3bed', 'apartment', 'bungalow', 'villa', 'land');
-CREATE TYPE unit_status AS ENUM ('vacant', 'occupied', 'to_let', 'available', 'sold', 'under_offer');
-CREATE TYPE unit_purpose AS ENUM ('rent', 'sale');
-CREATE TYPE plan_tier AS ENUM ('free_tier', 'free_trial', 'basic', 'professional', 'premium');
-CREATE TYPE plan_duration AS ENUM ('trial', 'monthly', 'quarterly', 'yearly', 'permanent');
-CREATE TYPE payment_status AS ENUM ('pending', 'completed', 'failed', 'refunded');
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('ADMIN', 'AGENT', 'PROPERTY_OWNER', 'CLIENT');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE commission_status AS ENUM ('PENDING', 'APPROVED', 'PAID');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE verification_purpose AS ENUM ('REGISTRATION', 'PASSWORD_RESET', 'PHONE_UPDATE');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE property_type AS ENUM ('apartment', 'house', 'commercial', 'land');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE property_status AS ENUM ('available', 'occupied', 'maintenance');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE subscription_status AS ENUM ('pending', 'active', 'inactive', 'expired', 'cancelled', 'trial');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE unit_type AS ENUM ('single', 'double', 'bedsitter', '1bed', '2bed', '3bed', 'apartment', 'bungalow', 'villa', 'land');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE unit_status AS ENUM ('vacant', 'occupied', 'to_let', 'available', 'sold', 'under_offer');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE unit_purpose AS ENUM ('rent', 'sale');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE plan_tier AS ENUM ('free_tier', 'free_trial', 'basic', 'professional', 'premium');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE plan_duration AS ENUM ('trial', 'monthly', 'quarterly', 'yearly', 'permanent');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE payment_status AS ENUM ('pending', 'completed', 'failed', 'refunded');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 -- Account Users table
-CREATE TABLE account_users (
+CREATE TABLE IF NOT EXISTS account_users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
     username VARCHAR(255) UNIQUE NOT NULL,
@@ -50,7 +98,7 @@ CREATE INDEX idx_account_users_role ON account_users(role);
 CREATE INDEX idx_account_users_phone ON account_users(phone_number);
 
 -- Agent Profiles
-CREATE TABLE agent_profiles (
+CREATE TABLE IF NOT EXISTS agent_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
     agent_id UUID UNIQUE NOT NULL,
@@ -64,7 +112,7 @@ CREATE TABLE agent_profiles (
 CREATE INDEX idx_agent_profiles_user ON agent_profiles(user_id);
 
 -- Property Owner Profiles
-CREATE TABLE property_owner_profiles (
+CREATE TABLE IF NOT EXISTS property_owner_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
     properties_owned INTEGER NOT NULL DEFAULT 0,
@@ -76,7 +124,7 @@ CREATE TABLE property_owner_profiles (
 CREATE INDEX idx_property_owner_profiles_user ON property_owner_profiles(user_id);
 
 -- Commissions
-CREATE TABLE commissions (
+CREATE TABLE IF NOT EXISTS commissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
     property_owner_id UUID NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
@@ -92,7 +140,7 @@ CREATE INDEX idx_commissions_agent ON commissions(agent_id);
 CREATE INDEX idx_commissions_property_owner ON commissions(property_owner_id);
 
 -- Phone Verifications
-CREATE TABLE phone_verifications (
+CREATE TABLE IF NOT EXISTS phone_verifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number VARCHAR(15) NOT NULL,
     email VARCHAR(255) NOT NULL,
@@ -107,7 +155,7 @@ CREATE TABLE phone_verifications (
 CREATE INDEX idx_phone_verifications_lookup ON phone_verifications(phone_number, purpose, is_used);
 
 -- Email OTPs
-CREATE TABLE email_otps (
+CREATE TABLE IF NOT EXISTS email_otps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) NOT NULL,
     code VARCHAR(6) NOT NULL,
@@ -120,7 +168,7 @@ CREATE TABLE email_otps (
 CREATE INDEX idx_email_otps_lookup ON email_otps(email, purpose, is_used);
 
 -- WhatsApp OTPs
-CREATE TABLE whatsapp_otps (
+CREATE TABLE IF NOT EXISTS whatsapp_otps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number VARCHAR(15) NOT NULL,
     code VARCHAR(6) NOT NULL,
@@ -131,7 +179,7 @@ CREATE TABLE whatsapp_otps (
 );
 
 -- Property Information
-CREATE TABLE properties (
+CREATE TABLE IF NOT EXISTS properties (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title VARCHAR(200) NOT NULL,
     description TEXT,
@@ -161,7 +209,7 @@ CREATE INDEX idx_properties_status ON properties(status);
 CREATE INDEX idx_properties_subscription ON properties(subscription_status);
 
 -- Property Units
-CREATE TABLE property_units (
+CREATE TABLE IF NOT EXISTS property_units (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     property_type unit_type,
@@ -183,7 +231,7 @@ CREATE TABLE property_units (
 CREATE INDEX idx_property_units_property ON property_units(property_id);
 
 -- Property Images
-CREATE TABLE property_images (
+CREATE TABLE IF NOT EXISTS property_images (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     image_url VARCHAR(500) NOT NULL,
@@ -195,7 +243,7 @@ CREATE TABLE property_images (
 CREATE INDEX idx_property_images_property ON property_images(property_id);
 
 -- Unit Images
-CREATE TABLE unit_images (
+CREATE TABLE IF NOT EXISTS unit_images (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     unit_id UUID NOT NULL REFERENCES property_units(id) ON DELETE CASCADE,
     image_url VARCHAR(500) NOT NULL,
@@ -205,7 +253,7 @@ CREATE TABLE unit_images (
 );
 
 -- Amenities
-CREATE TABLE amenities (
+CREATE TABLE IF NOT EXISTS amenities (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(100) NOT NULL,
     icon VARCHAR(50),
@@ -213,7 +261,7 @@ CREATE TABLE amenities (
 );
 
 -- Property Amenities
-CREATE TABLE property_amenities (
+CREATE TABLE IF NOT EXISTS property_amenities (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     amenity_id UUID NOT NULL REFERENCES amenities(id) ON DELETE CASCADE,
@@ -222,7 +270,7 @@ CREATE TABLE property_amenities (
 );
 
 -- Subscription Plans
-CREATE TABLE subscription_plans (
+CREATE TABLE IF NOT EXISTS subscription_plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(100) NOT NULL,
     tier plan_tier NOT NULL,
@@ -241,7 +289,7 @@ CREATE TABLE subscription_plans (
 );
 
 -- Property Subscriptions
-CREATE TABLE property_subscriptions (
+CREATE TABLE IF NOT EXISTS property_subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     plan_id UUID NOT NULL REFERENCES subscription_plans(id) ON DELETE CASCADE,

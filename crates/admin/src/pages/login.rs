@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::AdminRoute;
-use crate::api::admin::{admin_login};
-use crate::context::admin_auth::{use_admin_auth, set_token};
+use crate::api::admin::admin_login;
+use crate::context::admin_auth::{use_admin_auth, set_token, AdminAuthState};
 
 #[component]
 pub fn LoginPage() -> Element {
@@ -10,7 +10,7 @@ pub fn LoginPage() -> Element {
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
-    let mut error = use_signal(|| None::<String>);
+    let mut error = use_signal(|| Option::<String>::None);
 
     if auth.read().token.is_some() {
         return rsx! {
@@ -43,10 +43,14 @@ pub fn LoginPage() -> Element {
             match admin_login(e, p).await {
                 Ok(resp) => {
                     set_token(&resp.token);
-                    auth.set(crate::context::admin_auth::AdminAuthState {
+
+                    // FIX: resp.user is ALREADY an AdminUser! No manual mapping needed.
+                    // Serde handles the deserialization, including #[serde(default)] fields.
+                    auth.set(AdminAuthState {
                         token: Some(resp.token),
                         user: Some(resp.user),
                     });
+
                     let _ = nav.push(AdminRoute::DashboardPage);
                 }
                 Err(e) => {
@@ -97,9 +101,9 @@ pub fn LoginPage() -> Element {
 
                     button {
                         class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50",
-                        disabled: loading.read().clone(),
+                        disabled: *loading.read(),
                         onclick: submit,
-                        if loading.read().clone() { "Signing in..." } else { "Sign In" }
+                        if *loading.read() { "Signing in..." } else { "Sign In" }
                     }
                 }
             }

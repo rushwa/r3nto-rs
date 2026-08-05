@@ -9,7 +9,7 @@ pub fn PropertyOwnersPage() -> Element {
 
     let mut owners = use_signal(Vec::<AdminUser>::new);
     let mut loading = use_signal(|| true);
-    let mut error = use_signal(|| None<String>);
+    let mut error = use_signal(|| None::<String>);  // <-- fixed
 
     use_hook({
         let t = token.clone();
@@ -39,7 +39,7 @@ pub fn PropertyOwnersPage() -> Element {
                 }
             }
 
-            if loading.read().clone() {
+            if *loading.read() {
                 div { class: "flex justify-center py-12",
                     div { class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" }
                 }

@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-
 use crate::api::admin::{get_property_detail, PropertyDetail};
 use crate::components::sidebar::{PageHeader, StatusBadge};
 use crate::context::admin_auth::use_admin_auth;
@@ -33,25 +32,22 @@ pub fn PropertyDetailPage(id: String) -> Element {
     rsx! {
         div { class: "space-y-6",
             if let Some(p) = &prop_data {
-                PageHeader { title: p.title.clone(), subtitle: format!("{} • Listed {}", p.location, p.listing_date) }
-
+                PageHeader {
+                    title: p.title.clone(),
+                    subtitle: format!("{} • Listed {}", p.location, p.listing_date)
+                }
                 div { class: "grid grid-cols-1 lg:grid-cols-3 gap-6",
                     div { class: "lg:col-span-2 space-y-6",
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 overflow-hidden",
-                            div { class: "h-64 bg-gray-700 flex items-center justify-center text-6xl",
-                                "🏠"
-                            }
+                            div { class: "h-64 bg-gray-700 flex items-center justify-center text-6xl", "🏠" }
                             if !p.images.is_empty() {
                                 div { class: "p-3 flex gap-2 overflow-x-auto",
                                     for _img in p.images.iter() {
-                                        div { class: "w-20 h-20 bg-gray-700 rounded flex-shrink-0 flex items-center justify-center text-2xl",
-                                            "🏠"
-                                        }
+                                        div { class: "w-20 h-20 bg-gray-700 rounded flex-shrink-0 flex items-center justify-center text-2xl", "🏠" }
                                     }
                                 }
                             }
                         }
-
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                             h3 { class: "text-white font-semibold mb-3", "Property Details" }
                             div { class: "grid grid-cols-2 md:grid-cols-4 gap-4",
@@ -68,7 +64,7 @@ pub fn PropertyDetailPage(id: String) -> Element {
                                     p { class: "text-gray-500 text-xs", "Sq Ft" }
                                 }
                                 div { class: "text-center p-3 bg-gray-900 rounded-lg",
-                                    p { class: "text-2xl font-bold text-white", "${p.price:.0}" }
+                                    p { class: "text-2xl font-bold text-white", "${p.price as i64}" }
                                     p { class: "text-gray-500 text-xs", "Price" }
                                 }
                             }
@@ -81,16 +77,13 @@ pub fn PropertyDetailPage(id: String) -> Element {
                                     h4 { class: "text-sm font-medium text-gray-400 mb-2", "Features" }
                                     div { class: "flex flex-wrap gap-2",
                                         for feature in p.features.iter() {
-                                            span { class: "px-2.5 py-1 bg-gray-900 rounded text-xs text-gray-300 border border-gray-700",
-                                                "{feature}"
-                                            }
+                                            span { class: "px-2.5 py-1 bg-gray-900 rounded text-xs text-gray-300 border border-gray-700", "{feature}" }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-
                     div { class: "space-y-6",
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                             h3 { class: "text-white font-semibold mb-3", "Status" }
@@ -105,7 +98,6 @@ pub fn PropertyDetailPage(id: String) -> Element {
                                 }
                             }
                         }
-
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                             h3 { class: "text-white font-semibold mb-3", "Owner" }
                             div { class: "flex items-center gap-3",
@@ -119,7 +111,6 @@ pub fn PropertyDetailPage(id: String) -> Element {
                                 }
                             }
                         }
-
                         div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                             h3 { class: "text-white font-semibold mb-3", "Actions" }
                             div { class: "space-y-2",

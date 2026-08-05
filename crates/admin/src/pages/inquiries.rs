@@ -85,7 +85,7 @@ pub fn InquiriesPage() -> Element {
                                     }
                                     td { class: "px-4 py-3 text-gray-400 text-sm", "{inquiry.created_at}" }
                                     td { class: "px-4 py-3 text-gray-300 text-sm",
-                                        {inquiry.assigned_to.as_ref().map(|s| s.as_str()).unwrap_or("Unassigned")}
+                                        {inquiry.assigned_to.as_ref().map(|s: &String| s.as_str()).unwrap_or("Unassigned")}
                                     }
                                     td { class: "px-4 py-3",
                                         div { class: "flex items-center gap-1 flex-wrap",

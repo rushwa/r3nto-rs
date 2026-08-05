@@ -10,7 +10,7 @@ pub fn SettingsPage() -> Element {
     let token = auth.read().token.clone().unwrap_or_default();
     let token_for_resource = token.clone();
     let mut saving = use_signal(|| false);
-    let mut message = use_signal(|| None<String>);
+    let mut message: Signal<Option<String>> = use_signal(|| None::<String>);
 
     let settings = use_resource(move || {
         let t = token_for_resource.clone();
@@ -37,7 +37,7 @@ pub fn SettingsPage() -> Element {
         div { class: "space-y-6",
             PageHeader { title: "Settings".to_string(), subtitle: "System configuration and preferences".to_string() }
 
-            if let Some(s) = &settings_data {
+            if let Some(s) = settings_data.as_ref() {
                 div { class: "space-y-6 max-w-2xl",
                     div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                         h3 { class: "text-white font-semibold mb-4", "General" }
@@ -107,13 +107,13 @@ pub fn SettingsPage() -> Element {
 
                     button {
                         class: "px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50",
-                        disabled: saving.read().clone(),
+                        disabled: *saving.read(),
                         onclick: move |_| {
                             saving.set(true);
                             message.set(Some("Settings saved".to_string()));
                             saving.set(false);
                         },
-                        if saving.read().clone() { "Saving..." } else { "Save Changes" }
+                        {if *saving.read() { "Saving..." } else { "Save Changes" }}
                     }
                 }
             } else if settings_ref.as_ref().is_none() {

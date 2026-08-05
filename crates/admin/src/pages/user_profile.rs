@@ -9,7 +9,7 @@ pub fn UserProfilePage(id: String) -> Element {
 
     let mut profile = use_signal(|| None::<UserProfile>);
     let mut loading = use_signal(|| true);
-    let mut error = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);  // <-- fixed: added closure ||
 
     use_hook({
         let t = token.clone();
@@ -27,7 +27,7 @@ pub fn UserProfilePage(id: String) -> Element {
 
     rsx! {
         div { class: "p-6",
-            if loading.read().clone() {
+            if *loading.read() {
                 div { class: "flex justify-center py-12",
                     div { class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" }
                 }
@@ -69,24 +69,24 @@ pub fn UserProfilePage(id: String) -> Element {
                                 label { class: "text-sm text-gray-500", "Status" }
                                 span {
                                     class: if p.is_active { "text-green-400" } else { "text-red-400" },
-                                    if p.is_active { "Active" } else { "Disabled" }
+                                    {if p.is_active { "Active" } else { "Disabled" }}  // <-- braces
                                 }
                             }
                             div {
                                 label { class: "text-sm text-gray-500", "Superuser" }
-                                p { class: "text-white", if p.is_superuser { "Yes" } else { "No" } }
+                                p { class: "text-white", {if p.is_superuser { "Yes" } else { "No" }} }  // <-- braces
                             }
                             div {
                                 label { class: "text-sm text-gray-500", "Staff" }
-                                p { class: "text-white", if p.is_staff { "Yes" } else { "No" } }
+                                p { class: "text-white", {if p.is_staff { "Yes" } else { "No" }} }  // <-- braces
                             }
                             div {
                                 label { class: "text-sm text-gray-500", "Phone Verified" }
-                                p { class: "text-white", if p.phone_verified { "Yes" } else { "No" } }
+                                p { class: "text-white", {if p.phone_verified { "Yes" } else { "No" }} }  // <-- braces
                             }
                             div {
                                 label { class: "text-sm text-gray-500", "Subscribed" }
-                                p { class: "text-white", if p.subscribed { "Yes" } else { "No" } }
+                                p { class: "text-white", {if p.subscribed { "Yes" } else { "No" }} }  // <-- braces
                             }
                         }
 

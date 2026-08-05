@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-
 use crate::api::admin::{get_sales_data, get_top_agents, get_market_trends, SalesData, TopAgent, MarketTrend};
 use crate::components::sidebar::{PageHeader, StatCard};
 use crate::context::admin_auth::use_admin_auth;
@@ -11,7 +10,7 @@ pub fn AnalyticsPage() -> Element {
     let token_sales = token.clone();
     let token_agents = token.clone();
     let token_trends = token.clone();
-
+    
     let sales = use_resource(move || {
         let t = token_sales.clone();
         async move {
@@ -28,7 +27,7 @@ pub fn AnalyticsPage() -> Element {
             get_sales_data(&t).await
         }
     });
-
+    
     let top_agents = use_resource(move || {
         let t = token_agents.clone();
         async move {
@@ -42,7 +41,7 @@ pub fn AnalyticsPage() -> Element {
             get_top_agents(&t).await
         }
     });
-
+    
     let trends = use_resource(move || {
         let t = token_trends.clone();
         async move {
@@ -56,35 +55,35 @@ pub fn AnalyticsPage() -> Element {
             get_market_trends(&t).await
         }
     });
-
+    
     let sales_ref = sales.read();
     let sales_data = match sales_ref.as_ref() {
         Some(Ok(d)) => Some(d.clone()),
         _ => None,
     };
-
+    
     let agents_ref = top_agents.read();
     let agents_data = match agents_ref.as_ref() {
         Some(Ok(d)) => Some(d.clone()),
         _ => None,
     };
-
+    
     let trends_ref = trends.read();
     let trends_data = match trends_ref.as_ref() {
         Some(Ok(d)) => Some(d.clone()),
         _ => None,
     };
-
+    
     rsx! {
         div { class: "space-y-6",
             PageHeader { title: "Analytics".to_string(), subtitle: "Sales performance and market insights".to_string() }
-
+            
             div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                 StatCard { title: "Total Sales".to_string(), value: "142".to_string(), icon: "📈".to_string(), change: "+18%".to_string(), change_positive: true }
                 StatCard { title: "Total Revenue".to_string(), value: "$1.5M".to_string(), icon: "💰".to_string(), change: "+12%".to_string(), change_positive: true }
                 StatCard { title: "Avg Sale Price".to_string(), value: "$485K".to_string(), icon: "🏠".to_string(), change: "+4%".to_string(), change_positive: true }
             }
-
+            
             div { class: "grid grid-cols-1 lg:grid-cols-2 gap-6",
                 div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                     h3 { class: "text-white font-semibold mb-4", "Monthly Sales" }
@@ -93,7 +92,7 @@ pub fn AnalyticsPage() -> Element {
                             for item in data.iter() {
                                 div { class: "flex-1 flex flex-col items-center gap-2",
                                     div { class: "w-full bg-blue-500/20 rounded-t relative",
-                                        style: "height: {item.sales * 5}px",
+                                        style: format!("height: {}px", item.sales * 5),
                                         div { class: "absolute inset-0 bg-blue-500/40 rounded-t" }
                                     }
                                     span { class: "text-gray-400 text-xs", "{item.month}" }
@@ -104,7 +103,7 @@ pub fn AnalyticsPage() -> Element {
                         div { class: "h-48 bg-gray-700/30 rounded animate-pulse" }
                     }
                 }
-
+                
                 div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                     h3 { class: "text-white font-semibold mb-4", "Top Agents" }
                     if let Some(data) = &agents_data {
@@ -116,9 +115,9 @@ pub fn AnalyticsPage() -> Element {
                                     }
                                     div { class: "flex-1",
                                         p { class: "text-white text-sm font-medium", "{agent.name}" }
-                                        p { class: "text-gray-500 text-xs", "{agent.sales} sales • ${agent.revenue:.0} revenue" }
+                                        p { class: "text-gray-500 text-xs", "{agent.sales} sales • ${agent.revenue as i64} revenue" }
                                     }
-                                    span { class: "text-emerald-400 text-sm font-medium", "${agent.commission:.0}" }
+                                    span { class: "text-emerald-400 text-sm font-medium", "${agent.commission as i64}" }
                                 }
                             }
                         }
@@ -131,7 +130,7 @@ pub fn AnalyticsPage() -> Element {
                     }
                 }
             }
-
+            
             div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5",
                 h3 { class: "text-white font-semibold mb-4", "Market Trends" }
                 if let Some(data) = &trends_data {
@@ -139,7 +138,7 @@ pub fn AnalyticsPage() -> Element {
                         for trend in data.iter() {
                             div { class: "p-4 bg-gray-900 rounded-lg",
                                 p { class: "text-white font-medium", "{trend.area}" }
-                                p { class: "text-2xl font-bold text-white mt-1", "${trend.avg_price:.0}" }
+                                p { class: "text-2xl font-bold text-white mt-1", "${trend.avg_price as i64}" }
                                 div { class: "flex items-center gap-2 mt-2",
                                     span { class: "text-emerald-400 text-sm", "+{trend.price_change}%" }
                                     span { class: "text-gray-500 text-xs", "{trend.volume} sales" }
