@@ -1,4 +1,4 @@
-//crates/api/src/middlewares/admin_auth.rs
+// crates/api/src/middlewares/admin_auth.rs
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
@@ -42,11 +42,14 @@ pub async fn admin_auth_middleware(
         Err(_) => return Err(StatusCode::UNAUTHORIZED),
     };
 
-    if claims.role != "admin" && claims.role != "superuser" {
+    // FIX: Case-insensitive role check to match the uppercase roles from the backend
+    let role_upper = claims.role.to_uppercase();
+    if role_upper != "ADMIN" && role_upper != "SUPERUSER" {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    if path == "/admin/grant-privileges" && claims.role != "superuser" {
+    // Only superusers can grant privileges
+    if path == "/admin/grant-privileges" && role_upper != "SUPERUSER" {
         return Err(StatusCode::FORBIDDEN);
     }
 
