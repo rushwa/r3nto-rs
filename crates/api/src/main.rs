@@ -136,13 +136,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/login", post(handlers::admin::login))
         .route("/admin/users", post(handlers::admin::create_user))
         .route("/admin/users/:id", get(handlers::admin::get_user_profile))
-        .route("/admin/users/:id/toggle-active", post(handlers::admin::toggle_user_active))  // NEW// NEW
+        .route("/admin/users/:id/toggle-active", post(handlers::admin::toggle_user_active))
         .route("/admin/me", get(handlers::admin::get_current_admin))
         .route("/admin/stats", get(handlers::admin::get_stats))
         .route("/admin/users", get(handlers::admin::get_users))
         .route("/admin/agents", get(handlers::admin::get_agents))
+        // NOTE: Ensure handlers::admin::get_properties accepts Extension(claims): Extension<Claims>
         .route("/admin/properties", get(handlers::admin::get_properties))
         .route("/admin/properties/:id", get(handlers::admin::get_property_detail))
+        // NEW: Route for agent leads
+        .route("/admin/leads", get(handlers::admin::get_agent_leads))
         .route("/admin/subscriptions/plans", get(handlers::admin::get_subscription_plans))
         .route("/admin/commissions", get(handlers::admin::get_commissions))
         .route("/admin/inquiries", get(handlers::admin::get_inquiries))

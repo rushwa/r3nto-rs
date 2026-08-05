@@ -57,14 +57,23 @@ pub async fn get_agents(
     Ok(Json(agents))
 }
 
+// Update the existing get_properties handler:
 pub async fn get_properties(
     State(state): State<AppState>,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>, // <-- Pass claims here
 ) -> ApiResult<Json<Vec<Property>>> {
-    let properties = admin_service::get_properties(&state.db).await?;
+    let properties = admin_service::get_properties(&state.db, &claims).await?;
     Ok(Json(properties))
 }
 
+// Add the new get_agent_leads handler:
+pub async fn get_agent_leads(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>, // <-- Pass claims here
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let leads = admin_service::get_agent_leads(&state.db, &claims).await?;
+    Ok(Json(leads))
+}
 pub async fn get_property_detail(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,

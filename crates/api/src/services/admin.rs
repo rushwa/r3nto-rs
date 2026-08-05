@@ -237,26 +237,105 @@ pub async fn get_agents(db: &rento_core::Database) -> ApiResult<Vec<Agent>> {
     Ok(rows.into_iter().map(Agent::from).collect())
 }
 
-pub async fn get_properties(db: &rento_core::Database) -> ApiResult<Vec<Property>> {
-    let rows: Vec<PropertyDbRow> = sqlx::query_as(
-        r#"
-        SELECT
-            p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
-            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
-            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
-            COALESCE(p.property_type::text, '') as property_type,
-            0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
-            p.created_at
-        FROM properties p
-        JOIN account_users u ON p.owner_id = u.id
-        ORDER BY p.created_at DESC
-        "#
-    )
-        .fetch_all(pool(db)).await?;
+// ... (keep your existing imports at the top)
+
+pub async fn get_properties(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<Property>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    let is_agent = claims.role.to_uppercase() == "AGENT";
+
+    let rows: Vec<PropertyDbRow> = if is_agent {
+        // AGENT: Only see properties they own
+        sqlx::query_as(
+            r#"
+            SELECT
+                p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+                COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
+                COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+                COALESCE(p.property_type::text, '') as property_type,
+                0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+                p.created_at
+            FROM properties p
+            JOIN account_users u ON p.owner_id = u.id
+            WHERE p.owner_id = $1
+            ORDER BY p.created_at DESC
+            "#
+        )
+            .bind(user_id)
+            .fetch_all(pool(db)).await?
+    } else {
+        // ADMIN/SUPERUSER: See all properties
+        sqlx::query_as(
+            r#"
+            SELECT
+                p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+                COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
+                COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+                COALESCE(p.property_type::text, '') as property_type,
+                0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+                p.created_at
+            FROM properties p
+            JOIN account_users u ON p.owner_id = u.id
+            ORDER BY p.created_at DESC
+            "#
+        )
+            .fetch_all(pool(db)).await?
+    };
 
     Ok(rows.into_iter().map(Property::from).collect())
 }
 
+pub async fn get_agent_leads(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    let is_agent = claims.role.to_uppercase() == "AGENT";
+
+    let rows = if is_agent {
+        // AGENT: Only see leads they have claimed
+        sqlx::query(
+            r#"
+            SELECT
+                id::text, email, full_name, phone, status::text,
+                claimed_by::text, created_at, updated_at
+            FROM agent_leads
+            WHERE claimed_by = $1
+            ORDER BY created_at DESC
+            "#
+        )
+            .bind(user_id)
+            .fetch_all(pool(db)).await?
+    } else {
+        // ADMIN/SUPERUSER: See all leads
+        sqlx::query(
+            r#"
+            SELECT
+                id::text, email, full_name, phone, status::text,
+                claimed_by::text, created_at, updated_at
+            FROM agent_leads
+            ORDER BY created_at DESC
+            "#
+        )
+            .fetch_all(pool(db)).await?
+    };
+
+    // Map the rows to JSON (matching your get_user_profile pattern)
+    let leads: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "email": row.try_get::<String, _>("email").unwrap_or_default(),
+            "full_name": row.try_get::<String, _>("full_name").unwrap_or_default(),
+            "phone": row.try_get::<Option<String>, _>("phone").unwrap_or_default(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "claimed_by": row.try_get::<Option<String>, _>("claimed_by").unwrap_or_default(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").map(|d| d.to_string()).unwrap_or_default(),
+            "updated_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at").map(|d| d.to_string()).unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(leads)
+}
 pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResult<PropertyDetail> {
     let property_id = Uuid::parse_str(id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
