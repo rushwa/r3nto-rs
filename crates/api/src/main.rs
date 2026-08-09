@@ -45,12 +45,25 @@ async fn main() -> anyhow::Result<()> {
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "your-secret-key-change-in-production".to_string());
     let auth_service = Arc::new(rento_core::auth::AuthService::new(jwt_secret.clone()));
+    let email_service = Arc::new(
+        rento_core::email::EmailService::from_env()
+            .expect("Failed to initialize EmailService from environment")
+    );
+
+    // Near the top, after creating email_service:
+    let mpesa_client = Arc::new(
+        services::mpesa::MpesaClient::from_env()
+            .expect("Failed to initialize M-Pesa client from environment")
+    );
+
 
     // AppState is Clone — no Arc wrapper needed
     let state = AppState {
         db,
         auth: auth_service,
         jwt_secret,
+        email: email_service, // <-- Added
+        mpesa: mpesa_client,  // <-- NEW
     };
 
     // CLI mode
@@ -122,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/username-reset", post(handlers::auth::request_username_reset))
         .route("/auth/oauth/:provider", get(handlers::auth::oauth_login))
         .route("/auth/oauth/:provider/callback", get(handlers::auth::oauth_callback))
+        .route("/api/mpesa/callback", post(handlers::mpesa::mpesa_callback))
         .route("/choices/property-types", get(handlers::choices::property_types))
         .route("/choices/status-types", get(handlers::choices::status_types))
         .route("/choices/purpose-types", get(handlers::choices::purpose_types));
@@ -129,7 +143,9 @@ async fn main() -> anyhow::Result<()> {
     // Protected auth routes
     let protected_routes = Router::new()
         .route("/auth/me", get(handlers::auth::me))
-        .route("/auth/logout", post(handlers::auth::logout));
+        .route("/auth/logout", post(handlers::auth::logout))
+    .route("/api/payments/registration-fee", post(handlers::payments::pay_registration_fee))
+        .route("/api/payments/subscription", post(handlers::payments::pay_subscription));
 
     // Admin routes (with admin auth middleware)
     let admin_routes = Router::new()
@@ -140,16 +156,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/me", get(handlers::admin::get_current_admin))
         .route("/admin/stats", get(handlers::admin::get_stats))
         .route("/admin/users", get(handlers::admin::get_users))
+        .route("/admin/mpesa/stk-push", post(handlers::mpesa::initiate_payment))
         .route("/admin/agents", get(handlers::admin::get_agents))
         // NOTE: Ensure handlers::admin::get_properties accepts Extension(claims): Extension<Claims>
         .route("/admin/properties", get(handlers::admin::get_properties).post(handlers::admin::create_property))
         .route("/admin/properties/:id", get(handlers::admin::get_property_detail))
+        .route("/admin/property-owners", get(handlers::admin::get_property_owners_with_status))
         // NEW: Route for agent leads
         .route("/admin/leads", get(handlers::admin::get_agent_leads))
         .route("/admin/agents/handshake/initiate", post(handlers::admin::initiate_handshake))
         .route("/admin/agents/handshake/verify", post(handlers::admin::verify_handshake))
+        .route("/admin/registration-fee/status", get(handlers::admin::get_registration_fee_status))
         .route("/admin/subscriptions/plans", get(handlers::admin::get_subscription_plans))
         .route("/admin/commissions", get(handlers::admin::get_commissions))
+        .route("/admin/commissions/my", get(handlers::mpesa::get_my_commissions))
+        .route("/admin/commissions/my/wallet", get(handlers::mpesa::get_my_wallet))
+        .route("/admin/commissions/my/payout", post(handlers::mpesa::request_payout))
         .route("/admin/inquiries", get(handlers::admin::get_inquiries))
         .route("/admin/inquiries/:id", post(handlers::admin::update_inquiry_status))
         .route("/admin/analytics/sales", get(handlers::admin::get_sales_data))

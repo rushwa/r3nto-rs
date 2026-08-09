@@ -5,7 +5,6 @@ use axum::{
     response::Response,
 };
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
-
 use crate::state::AppState;
 use crate::models::admin::Claims;
 
@@ -46,23 +45,27 @@ pub async fn admin_auth_middleware(
     let is_agent = role_upper == "AGENT";
     let is_property_owner = role_upper == "PROPERTY_OWNER";
 
-    // Define routes that agents are explicitly allowed to access
-    // Using starts_with() to match both list routes (/admin/properties) and detail routes (/admin/properties/:id)
+    // ───────────────────────────────────────────
+    // Agent allowed routes
+    // ───────────────────────────────────────────
     let is_agent_allowed_route = path == "/admin/me"
         || path.starts_with("/admin/properties")
         || path == "/admin/leads"
         || path == "/admin/commissions"
+        || path.starts_with("/admin/commissions/my")  // Agent wallet + commissions
         || path.starts_with("/admin/agents/handshake/");
 
-    // Define routes that property owners are explicitly allowed to access
+    // ───────────────────────────────────────────
+    // Property Owner allowed routes
+    // ───────────────────────────────────────────
     let is_property_owner_allowed_route = path == "/admin/me"
         || path.starts_with("/admin/properties")
-        || path == "/admin/commissions";
+        || path == "/admin/commissions"
+        || path.starts_with("/admin/commissions/my")  // Agent wallet + commissions
+        || path == "/admin/registration-fee/status"   // ✅ NEW: Check payment status
+        || path.starts_with("/api/payments/");        // ✅ NEW: Payment endpoints
 
-    // Authorization Logic:
-    // - Admins/Superusers can access everything.
-    // - Agents can ONLY access their specific allowed routes.
-    // - Property Owners can ONLY access their specific allowed routes.
+    // Authorization Logic
     if !is_admin_or_superuser
         && !(is_agent && is_agent_allowed_route)
         && !(is_property_owner && is_property_owner_allowed_route)

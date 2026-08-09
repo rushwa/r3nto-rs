@@ -1,4 +1,3 @@
-
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,7 +7,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
-
 use rento_core::{
     error::RentoError,
     models::{
@@ -17,14 +15,12 @@ use rento_core::{
     },
     email::EmailService,
 };
-
 use crate::middleware::auth::RequireAuth;
 use crate::state::AppState;
 
 // ───────────────────────────────────────────
 // DTOs
 // ───────────────────────────────────────────
-
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(email(message = "Invalid email format"))]
@@ -114,7 +110,6 @@ pub struct UsernameResetRequest {
 // ───────────────────────────────────────────
 // Registration
 // ───────────────────────────────────────────
-
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
@@ -194,7 +189,6 @@ pub async fn register(
     let last_name = req.last_name.clone().unwrap_or_default();
     let email = req.email.clone();
     let phone_number = req.phone_number.clone();
-
     let user_id = uuid::Uuid::new_v4();
     let now = Utc::now();
 
@@ -221,8 +215,10 @@ pub async fn register(
         .execute(&state.db.pool)
         .await?;
 
+    // ✅ FIX: Convert UserRole to String using .to_string()
+    let role_str = role.to_string();
     let (access_token, refresh_token) = state.auth.generate_tokens(
-        user_id, &role, &email, &email,
+        user_id, &role_str, &email, &email,
     )?;
 
     let user = UserResponse {
@@ -258,7 +254,6 @@ pub async fn register(
 // ───────────────────────────────────────────
 // Login
 // ───────────────────────────────────────────
-
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
@@ -303,8 +298,10 @@ pub async fn login(
         ).into_response());
     }
 
+    // ✅ FIX: Convert UserRole to String using .to_string()
+    let role_str = user.role.to_string();
     let (access_token, refresh_token) = state.auth.generate_tokens(
-        user.id, &user.role, &user.username, &user.email,
+        user.id, &role_str, &user.username, &user.email,
     )?;
 
     let user_response = UserResponse {
@@ -340,7 +337,6 @@ pub async fn login(
 // ───────────────────────────────────────────
 // Request Email OTP
 // ───────────────────────────────────────────
-
 pub async fn request_email_otp(
     State(state): State<AppState>,
     Json(req): Json<VerifyEmailRequest>,
@@ -368,6 +364,7 @@ pub async fn request_email_otp(
         .await?;
 
     let email_service = EmailService::from_env()?;
+
     if let Err(e) = email_service.send_verification_code(&req.email, None, &code).await {
         tracing::warn!("Failed to send verification email: {}. Code for {}: {}", e, req.email, code);
     } else {
@@ -385,7 +382,6 @@ pub async fn request_email_otp(
 // ───────────────────────────────────────────
 // Verify Email Code
 // ───────────────────────────────────────────
-
 pub async fn verify_email_code(
     State(state): State<AppState>,
     Json(req): Json<VerifyCodeRequest>,
@@ -418,7 +414,6 @@ pub async fn verify_email_code(
 // ───────────────────────────────────────────
 // Verify Email (alias)
 // ───────────────────────────────────────────
-
 pub async fn verify_email(
     State(state): State<AppState>,
     Json(req): Json<VerifyCodeRequest>,
@@ -429,7 +424,6 @@ pub async fn verify_email(
 // ───────────────────────────────────────────
 // Verify Phone (stub)
 // ───────────────────────────────────────────
-
 pub async fn verify_phone(
     State(_state): State<AppState>,
     Json(_req): Json<VerifyCodeRequest>,
@@ -443,12 +437,13 @@ pub async fn verify_phone(
 // ───────────────────────────────────────────
 // Refresh Token
 // ───────────────────────────────────────────
-
 pub async fn refresh_token(
     State(state): State<AppState>,
     Json(req): Json<RefreshTokenRequest>,
 ) -> Result<Response, RentoError> {
     let claims = state.auth.verify_token(&req.refresh_token)?;
+
+    // ✅ FIX: claims.role is now String, so pass it directly
     let (access_token, refresh_token) = state.auth.generate_tokens(
         claims.sub, &claims.role, &claims.username, &claims.email,
     )?;
@@ -484,7 +479,6 @@ pub async fn refresh_token(
 // ───────────────────────────────────────────
 // Get Current User
 // ───────────────────────────────────────────
-
 pub async fn me(
     State(state): State<AppState>,
     auth_user: RequireAuth,
@@ -521,7 +515,6 @@ pub async fn me(
 // ───────────────────────────────────────────
 // Logout
 // ───────────────────────────────────────────
-
 pub async fn logout(
     _auth_user: RequireAuth,
 ) -> Result<Response, RentoError> {
@@ -534,7 +527,6 @@ pub async fn logout(
 // ───────────────────────────────────────────
 // Password Reset
 // ───────────────────────────────────────────
-
 pub async fn request_password_reset(
     State(state): State<AppState>,
     Json(req): Json<PasswordResetRequest>,
@@ -576,6 +568,7 @@ pub async fn request_password_reset(
         .await?;
 
     let email_service = EmailService::from_env()?;
+
     if let Err(e) = email_service.send_password_reset(&req.email, &code).await {
         tracing::warn!("Failed to send password reset email: {}. Code for {}: {}", e, req.email, code);
     } else {
@@ -636,7 +629,6 @@ pub async fn confirm_password_reset(
 // ───────────────────────────────────────────
 // Resend Activation
 // ───────────────────────────────────────────
-
 pub async fn resend_activation(
     State(state): State<AppState>,
     Json(req): Json<ResendActivationRequest>,
@@ -678,6 +670,7 @@ pub async fn resend_activation(
         .await?;
 
     let email_service = EmailService::from_env()?;
+
     if let Err(e) = email_service.send_verification_code(&req.email, None, &code).await {
         tracing::warn!("Failed to send activation email: {}. Code for {}: {}", e, req.email, code);
     } else {
@@ -695,7 +688,6 @@ pub async fn resend_activation(
 // ───────────────────────────────────────────
 // Activate Account
 // ───────────────────────────────────────────
-
 pub async fn activate_account(
     State(state): State<AppState>,
     Json(req): Json<ActivateAccountRequest>,
@@ -739,7 +731,6 @@ pub async fn activate_account(
 // ───────────────────────────────────────────
 // Username Reset
 // ───────────────────────────────────────────
-
 pub async fn request_username_reset(
     State(_state): State<AppState>,
     Json(_req): Json<UsernameResetRequest>,
@@ -753,7 +744,6 @@ pub async fn request_username_reset(
 // ───────────────────────────────────────────
 // OAuth (stubs)
 // ───────────────────────────────────────────
-
 pub async fn oauth_login(
     Path(_provider): Path<String>,
 ) -> Result<Response, RentoError> {
@@ -776,7 +766,6 @@ pub async fn oauth_callback(
 // ───────────────────────────────────────────
 // Google OAuth (backward compatibility)
 // ───────────────────────────────────────────
-
 pub async fn google_oauth(
     State(_state): State<AppState>,
 ) -> Result<Response, RentoError> {

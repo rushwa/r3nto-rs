@@ -235,32 +235,6 @@ pub async fn grant_admin_privileges(token: &str, req: &GrantPrivilegesRequest) -
     Ok(())
 }
 
-pub async fn initiate_handshake(token: &str, target_user_id: &str) -> Result<(), String> {
-    #[derive(Serialize)]
-    struct Req { target_user_id: String }
-
-    let body = serde_json::to_string(&Req { target_user_id: target_user_id.to_string() })
-        .map_err(|e| e.to_string())?;
-
-    let _: serde_json::Value = fetch_json("/admin/agents/handshake/initiate", "POST", Some(token), Some(body)).await?;
-    Ok(())
-}
-
-pub async fn verify_handshake(token: &str, target_user_id: &str, otp_code: &str) -> Result<(), String> {
-    #[derive(Serialize)]
-    struct Req {
-        target_user_id: String,
-        otp_code: String
-    }
-
-    let body = serde_json::to_string(&Req {
-        target_user_id: target_user_id.to_string(),
-        otp_code: otp_code.to_string()
-    }).map_err(|e| e.to_string())?;
-
-    let _: serde_json::Value = fetch_json("/admin/agents/handshake/verify", "POST", Some(token), Some(body)).await?;
-    Ok(())
-}
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(
     path: &str,
@@ -445,4 +419,55 @@ pub struct PropertyDetail {
 
 pub async fn get_property_detail(token: &str, property_id: &str) -> Result<PropertyDetail, String> {
     fetch_json(&format!("/admin/properties/{}", property_id), "GET", Some(token), None).await
+}
+
+// ───────────────────────────────────────────
+// Digital Handshake (Email + UUID flow)
+// ───────────────────────────────────────────
+pub async fn initiate_handshake(token: &str, target_user_id: &str, target_email: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req {
+        target_user_id: String,
+        target_email: String,
+    }
+
+    let body = serde_json::to_string(&Req {
+        target_user_id: target_user_id.to_string(),
+        target_email: target_email.to_string(),
+    })
+        .map_err(|e| e.to_string())?;
+
+    let _: serde_json::Value = fetch_json(
+        "/admin/agents/handshake/initiate",
+        "POST",
+        Some(token),
+        Some(body),
+    ).await?;
+
+    Ok(())
+}
+
+pub async fn verify_handshake(token: &str, target_user_id: &str, target_email: &str, otp_code: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req {
+        target_user_id: String,
+        target_email: String,
+        otp_code: String,
+    }
+
+    let body = serde_json::to_string(&Req {
+        target_user_id: target_user_id.to_string(),
+        target_email: target_email.to_string(),
+        otp_code: otp_code.to_string(),
+    })
+        .map_err(|e| e.to_string())?;
+
+    let _: serde_json::Value = fetch_json(
+        "/admin/agents/handshake/verify",
+        "POST",
+        Some(token),
+        Some(body),
+    ).await?;
+
+    Ok(())
 }

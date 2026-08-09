@@ -10,6 +10,18 @@ pub struct AdminUser {
     pub role: String,
 }
 
+// JWT Claims — MUST match TokenClaims in core/models.rs
+// ───────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String,              // user ID as String
+    pub email: String,
+    pub role: String,             // ✅ String, not enum
+    pub username: Option<String>, // ✅ Optional (admin tokens don't need it)
+    pub exp: usize,
+    pub iat: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
@@ -55,15 +67,6 @@ pub struct CreateUserRequest {
     pub last_name: String,
     pub role: String,
     pub phone_number: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Claims {
-    pub sub: String,
-    pub email: String,
-    pub role: String,
-    pub exp: usize,
-    pub iat: usize,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

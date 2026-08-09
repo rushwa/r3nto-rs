@@ -6,3 +6,4 @@ pub mod subscription;
 pub mod commission;
 pub mod inquiry;
 pub mod analytics;
+pub(crate) mod mpesa;

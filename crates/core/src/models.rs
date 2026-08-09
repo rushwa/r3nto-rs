@@ -1,14 +1,13 @@
 // crates/core/src/models.rs
 // Translation of Django models to Rust structs
-
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
-// ==================== USER MODELS ====================
-
+// ==================== USER ROLE ENUM ====================
+// Used for database/sqlx operations only. NOT used in JWT tokens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "user_role", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UserRole {
@@ -35,6 +34,30 @@ impl std::fmt::Display for UserRole {
     }
 }
 
+impl UserRole {
+    /// Convert database role string to UserRole enum
+    pub fn from_db_role(role: &str) -> Self {
+        match role.to_uppercase().as_str() {
+            "ADMIN" => UserRole::Admin,
+            "AGENT" => UserRole::Agent,
+            "PROPERTY_OWNER" => UserRole::PropertyOwner,
+            "CLIENT" => UserRole::Client,
+            _ => UserRole::Client,
+        }
+    }
+
+    /// Convert UserRole enum to database role string
+    pub fn to_db_role(&self) -> &'static str {
+        match self {
+            UserRole::Admin => "ADMIN",
+            UserRole::Agent => "AGENT",
+            UserRole::PropertyOwner => "PROPERTY_OWNER",
+            UserRole::Client => "CLIENT",
+        }
+    }
+}
+
+// ==================== USER MODELS ====================
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, sqlx::FromRow)]
 pub struct AccountUser {
     pub id: Uuid,
@@ -48,18 +71,15 @@ pub struct AccountUser {
     pub first_name: String,
     pub last_name: String,
     pub profile: Option<String>,
-
     // Location fields
     pub county: Option<String>,
     pub constituency: Option<String>,
     pub ward: Option<String>,
     pub location: Option<String>,
-
     // Phone verification
     pub phone_verified: bool,
     pub phone_verification_code: Option<String>,
     pub phone_verification_sent_at: Option<DateTime<Utc>>,
-
     pub is_staff: bool,
     pub is_active: bool,
     pub is_superuser: bool,
@@ -96,7 +116,6 @@ impl AccountUser {
 }
 
 // ==================== PROFILE MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AgentProfile {
     pub id: Uuid,
@@ -120,7 +139,6 @@ pub struct PropertyOwnerProfile {
 }
 
 // ==================== COMMISSION MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "commission_status", rename_all = "UPPERCASE")]
 pub enum CommissionStatus {
@@ -132,8 +150,8 @@ pub enum CommissionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Commission {
     pub id: Uuid,
-    pub agent_id: Uuid,        // AgentProfile.id
-    pub property_owner_id: Uuid, // AccountUser.id
+    pub agent_id: Uuid,
+    pub property_owner_id: Uuid,
     pub amount: Decimal,
     pub commission_percentage: Decimal,
     pub status: CommissionStatus,
@@ -142,7 +160,6 @@ pub struct Commission {
 }
 
 // ==================== VERIFICATION MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "verification_purpose", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VerificationPurpose {
@@ -203,7 +220,6 @@ pub struct WhatsAppOtp {
 }
 
 // ==================== PROPERTY MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "property_type", rename_all = "lowercase")]
 pub enum PropertyType {
@@ -349,7 +365,6 @@ pub struct PropertyAmenity {
 }
 
 // ==================== SUBSCRIPTION MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "plan_tier", rename_all = "lowercase")]
 pub enum PlanTier {
@@ -437,7 +452,6 @@ impl PropertySubscription {
 }
 
 // ==================== AUTH MODELS ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthToken {
     pub access_token: String,
@@ -446,18 +460,20 @@ pub struct AuthToken {
     pub expires_in: i64,
 }
 
+// ✅ FIX: role is now String, NOT UserRole enum
+// This fixes the JWT deserialization error where the backend generates
+// "PROPERTY_OWNER" but the enum expected "PropertyOwner"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenClaims {
-    pub sub: Uuid,      // user id
-    pub role: UserRole,
+    pub sub: Uuid,
+    pub role: String,      // ✅ Changed from UserRole to String
     pub username: String,
     pub email: String,
-    pub exp: i64,       // expiration
-    pub iat: i64,       // issued at
+    pub exp: i64,
+    pub iat: i64,
 }
 
 // ==================== REQUEST/RESPONSE DTOs ====================
-
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(email)]

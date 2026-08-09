@@ -18,6 +18,7 @@ use crate::models::commission::{Commission, CommissionDbRow};
 use crate::models::inquiry::{Inquiry, InquiryDbRow};
 use crate::models::analytics::{StatsData, SalesData, TopAgent, MarketTrend, SystemSettings};
 
+
 fn pool(db: &rento_core::Database) -> &sqlx::PgPool {
     &db.pool
 }
@@ -240,31 +241,61 @@ pub async fn get_agents(db: &rento_core::Database) -> ApiResult<Vec<Agent>> {
 
 
 
-pub async fn initiate_handshake(db: &rento_core::Database, agent_id: &str, target_identifier: &str) -> ApiResult<()> {
-    let target_uuid = if let Ok(uuid) = Uuid::parse_str(target_identifier) {
-        uuid
-    } else {
-        let email_uuid: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM account_users WHERE email = $1"
-        )
-            .bind(target_identifier)
-            .fetch_optional(pool(db))
-            .await?;
+// ───────────────────────────────────────────
+// DIGITAL HANDSHAKE (UPDATED: requires email + UUID)
+// ───────────────────────────────────────────
 
-        match email_uuid {
-            Some(id) => id,
-            None => return Err(ApiError::NotFound("User not found with this email or UUID".to_string())),
-        }
+/// Agent initiates handshake by providing BOTH the client's UUID and email.
+/// The system verifies they match in the database, then sends an OTP to the email.
+// ───────────────────────────────────────────
+// DIGITAL HANDSHAKE (Requires BOTH UUID and Email)
+// ───────────────────────────────────────────
+
+pub async fn initiate_handshake(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,
+    agent_id: &str,
+    target_user_id: &str,
+    target_email: &str,
+) -> ApiResult<()> {
+    let agent_uuid = Uuid::parse_str(agent_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid Agent UUID: {}", e)))?;
+
+    // 1. Parse target UUID (strictly requires a valid UUID format)
+    let target_uuid = Uuid::parse_str(target_user_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid User ID format. Must be a valid UUID: {}", e)))?;
+
+    // 2. Fetch both Agent and Target User details
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT
+            COALESCE(NULLIF(a.first_name || ' ' || a.last_name, ' '), a.username) as agent_name,
+            t.email as target_email,
+            COALESCE(NULLIF(t.first_name || ' ' || t.last_name, ' '), t.username) as target_name,
+            t.role::text as current_role
+        FROM account_users a
+        CROSS JOIN account_users t
+        WHERE a.id = $1 AND t.id = $2
+        "#
+    )
+        .bind(agent_uuid)
+        .bind(target_uuid)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (agent_name, found_email, target_name, current_role) = match row {
+        Some(r) => r,
+        None => return Err(ApiError::NotFound("Agent or Target user not found".to_string())),
     };
 
-    let (email, current_role): (String, String) = sqlx::query_as(
-        "SELECT email, role::text FROM account_users WHERE id = $1"
-    )
-        .bind(target_uuid)
-        .fetch_one(pool(db))
-        .await
-        .map_err(|_| ApiError::NotFound("User not found".to_string()))?;
+    // 3. SECURITY CHECK: Verify the provided email matches the UUID in the database
+    if found_email.to_lowercase() != target_email.to_lowercase() {
+        return Err(ApiError::BadRequest(
+            "Email does not match the provided User ID. Please verify both with the client.".into()
+        ));
+    }
 
+    // 4. Verify target is a CLIENT
     if current_role != "CLIENT" {
         return Err(ApiError::BadRequest(format!(
             "Target user is currently a '{}' and cannot be converted.",
@@ -272,90 +303,108 @@ pub async fn initiate_handshake(db: &rento_core::Database, agent_id: &str, targe
         )));
     }
 
+    // 5. Generate OTP
     let otp = format!("{:06}", rand::thread_rng().gen_range(0..1000000));
     let expires_at = Utc::now() + Duration::minutes(15);
 
-    // FIX: Use UPSERT to replace any existing OTP for this email
+    // 6. Insert new OTP
     sqlx::query(
         "INSERT INTO email_otps (email, code, purpose, expires_at, is_used)
          VALUES ($1, $2, 'ROLE_CONVERSION', $3, false)
          ON CONFLICT (email) DO UPDATE
          SET code = $2, purpose = 'ROLE_CONVERSION', expires_at = $3, is_used = false"
     )
-        .bind(&email)
+        .bind(&found_email)
         .bind(&otp)
         .bind(expires_at)
         .execute(pool(db))
         .await?;
 
-    tracing::info!("🛡️ HANDSHAKE OTP for user {} ({}): {} (Simulated email send)", target_identifier, email, otp);
+    // 7. Send the email
+    email_service
+        .send_handshake_otp(&found_email, &target_name, &agent_name, &otp)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to send Handshake email: {}", e);
+            ApiError::Internal(format!("Failed to send verification email: {}", e))
+        })?;
+
+    tracing::info!("🤝 Handshake OTP sent to {} by agent {}", found_email, agent_name);
 
     Ok(())
 }
-pub async fn verify_handshake(db: &rento_core::Database, agent_id: &str, target_identifier: &str, otp_code: &str) -> ApiResult<()> {
+
+pub async fn verify_handshake(
+    db: &rento_core::Database,
+    agent_id: &str,
+    target_user_id: &str,
+    target_email: &str,
+    otp_code: &str,
+) -> ApiResult<()> {
+    // 1. Parse UUIDs
     let agent_uuid = Uuid::parse_str(agent_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid Agent UUID: {}", e)))?;
+    let target_uuid = Uuid::parse_str(target_user_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid User ID format: {}", e)))?;
 
-    // 1. Try to parse as UUID first. If it fails, assume it's an email and look it up.
-    let target_uuid = if let Ok(uuid) = Uuid::parse_str(target_identifier) {
-        uuid
-    } else {
-        let email_uuid: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM account_users WHERE email = $1"
-        )
-            .bind(target_identifier)
-            .fetch_optional(pool(db))
-            .await?;
+    // 2. Look up user by UUID
+    let user_check: Option<(String, String)> = sqlx::query_as(
+        "SELECT email, role::text FROM account_users WHERE id = $1 AND is_active = true"
+    )
+        .bind(target_uuid)
+        .fetch_optional(pool(db))
+        .await?;
 
-        match email_uuid {
-            Some(id) => id,
-            None => return Err(ApiError::NotFound("User not found with this email or UUID".to_string())),
-        }
+    let (found_email, _current_role) = match user_check {
+        Some(u) => u,
+        None => return Err(ApiError::NotFound("User not found with this User ID".into())),
     };
 
-    // 2. Get user's email to check OTP
-    let email: String = sqlx::query_scalar("SELECT email FROM account_users WHERE id = $1")
-        .bind(target_uuid)
-        .fetch_one(pool(db))
-        .await
-        .map_err(|_| ApiError::NotFound("User not found".to_string()))?;
+    // 3. SECURITY CHECK: Verify email matches
+    if found_email.to_lowercase() != target_email.to_lowercase() {
+        return Err(ApiError::BadRequest(
+            "Email does not match the provided User ID.".into()
+        ));
+    }
 
-    // 3. Verify OTP (get the most recent unused ROLE_CONVERSION OTP for this email)
+    // 4. Verify OTP
     let otp_record: Option<(Uuid, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, is_used, expires_at FROM email_otps
          WHERE email = $1 AND code = $2 AND purpose = 'ROLE_CONVERSION'
          ORDER BY created_at DESC LIMIT 1"
     )
-        .bind(&email)
+        .bind(&found_email)
         .bind(otp_code)
         .fetch_optional(pool(db))
         .await?;
 
     let (otp_id, is_used, expires_at) = match otp_record {
         Some(record) => record,
-        None => return Err(ApiError::Unauthorized("Invalid OTP code".to_string())),
+        None => return Err(ApiError::Unauthorized("Invalid OTP code".into())),
     };
 
     if is_used {
-        return Err(ApiError::BadRequest("This OTP has already been used".to_string()));
+        return Err(ApiError::BadRequest("This OTP has already been used".into()));
     }
-    if Utc::now() > expires_at {
-        return Err(ApiError::BadRequest("This OTP has expired".to_string()));
+    if chrono::Utc::now() > expires_at {
+        return Err(ApiError::BadRequest("This OTP has expired. Please request a new one.".into()));
     }
 
-    // 4. Mark OTP as used
+    // 5. Mark OTP as used
     sqlx::query("UPDATE email_otps SET is_used = true WHERE id = $1")
         .bind(otp_id)
         .execute(pool(db))
         .await?;
 
-    // 5. Promote user to PROPERTY_OWNER
-    sqlx::query("UPDATE account_users SET role = 'PROPERTY_OWNER', updated_at = NOW() WHERE id = $1")
+    // 6. Promote to PROPERTY_OWNER + grant dashboard access
+    sqlx::query(
+        "UPDATE account_users SET role = 'PROPERTY_OWNER', is_staff = TRUE, updated_at = NOW() WHERE id = $1"
+    )
         .bind(target_uuid)
         .execute(pool(db))
         .await?;
 
-    // 6. Record the conversion relationship (enforces "only see owners they converted")
+    // 7. Record the conversion relationship
     sqlx::query(
         "INSERT INTO agent_conversions (agent_id, property_owner_id, converted_at)
          VALUES ($1, $2, NOW())
@@ -366,7 +415,73 @@ pub async fn verify_handshake(db: &rento_core::Database, agent_id: &str, target_
         .execute(pool(db))
         .await?;
 
+    tracing::info!(
+        "✅ Digital Handshake complete: Agent {} converted {} (User ID: {}) to PROPERTY_OWNER",
+        agent_id, found_email, target_uuid
+    );
+
     Ok(())
+}
+pub async fn get_property_owners_with_status(db: &rento_core::Database) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            u.id::text,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as name,
+            u.email,
+            u.phone_number,
+            CASE WHEN u.is_active THEN 'active' ELSE 'inactive' END as status,
+            u.date_joined as created_at,
+            EXISTS (
+                SELECT 1 FROM payments p
+                WHERE p.payer_id = u.id
+                AND p.payment_type = 'registration_fee'
+                AND p.status = 'completed'
+            ) as has_paid_registration_fee,
+            (SELECT COALESCE(NULLIF(a.first_name || ' ' || a.last_name, ' '), a.username)
+             FROM agent_conversions ac
+             JOIN account_users a ON ac.agent_id = a.id
+             WHERE ac.property_owner_id = u.id
+             LIMIT 1) as converted_by_agent,
+            (SELECT COUNT(*) FROM properties pr WHERE pr.owner_id = u.id) as property_count
+        FROM account_users u
+        WHERE u.role = 'PROPERTY_OWNER'
+        ORDER BY u.date_joined DESC
+        "#
+    )
+        .fetch_all(pool(db))
+        .await?;
+
+    let owners: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "name": row.try_get::<String, _>("name").unwrap_or_default(),
+            "email": row.try_get::<String, _>("email").unwrap_or_default(),
+            "phone": row.try_get::<Option<String>, _>("phone_number").unwrap_or_default(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "has_paid_registration_fee": row.try_get::<bool, _>("has_paid_registration_fee").unwrap_or(false),
+            "converted_by_agent": row.try_get::<Option<String>, _>("converted_by_agent").unwrap_or_default(),
+            "property_count": row.try_get::<i64, _>("property_count").unwrap_or(0),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(owners)
+}
+// ───────────────────────────────────────────
+// Check if a Property Owner has paid the registration fee
+// ───────────────────────────────────────────
+pub async fn has_paid_registration_fee(db: &rento_core::Database, user_id: &Uuid) -> ApiResult<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payments WHERE payer_id = $1 AND payment_type = 'registration_fee' AND status = 'completed'"
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    Ok(count > 0)
 }
 pub async fn get_properties(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<Property>> {
     let user_id = Uuid::parse_str(&claims.sub)
@@ -819,6 +934,7 @@ fn generate_token_with_secret(user: &AdminUser, secret: &str) -> ApiResult<Strin
         sub: user.id.clone(),
         email: user.email.clone(),
         role: user.role.clone(),
+        username: Some(user.name.clone()), // ✅ Add username
         exp,
         iat,
     };
