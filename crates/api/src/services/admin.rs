@@ -946,3 +946,121 @@ fn generate_token_with_secret(user: &AdminUser, secret: &str) -> ApiResult<Strin
     )
         .map_err(|e| ApiError::Internal(format!("Token generation failed: {}", e)))
 }
+
+// ───────────────────────────────────────────
+// Payout Management
+// ───────────────────────────────────────────
+
+pub async fn get_pending_payouts(db: &rento_core::Database) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            pr.id::text, pr.amount::float8, pr.status, pr.mpesa_phone,
+            pr.created_at, pr.processed_at,
+            u.id::text as agent_id,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name,
+            u.email as agent_email
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        ORDER BY pr.created_at DESC
+        LIMIT 100
+        "#
+    )
+        .fetch_all(pool(db))
+        .await?;
+
+    let payouts: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "amount": row.try_get::<f64, _>("amount").unwrap_or(0.0),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "mpesa_phone": row.try_get::<String, _>("mpesa_phone").unwrap_or_default(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "processed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")
+                .ok().flatten().map(|d| d.to_string()),
+            "agent_id": row.try_get::<String, _>("agent_id").unwrap_or_default(),
+            "agent_name": row.try_get::<String, _>("agent_name").unwrap_or_default(),
+            "agent_email": row.try_get::<String, _>("agent_email").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(payouts)
+}
+
+pub async fn approve_payout(db: &rento_core::Database, payout_id: &str) -> ApiResult<()> {
+    let id = Uuid::parse_str(payout_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Check current status
+    let current_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM payout_requests WHERE id = $1"
+    )
+        .bind(id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    match current_status {
+        Some(s) if s == "pending" => {},
+        Some(s) => return Err(ApiError::BadRequest(format!("Payout is already {}", s))),
+        None => return Err(ApiError::NotFound("Payout not found".into())),
+    }
+
+    // Mark as approved and processed
+    sqlx::query(
+        "UPDATE payout_requests SET status = 'approved', processed_at = NOW() WHERE id = $1"
+    )
+        .bind(id)
+        .execute(pool(db))
+        .await?;
+
+    tracing::info!("✅ Payout {} approved", payout_id);
+    Ok(())
+}
+
+pub async fn reject_payout(db: &rento_core::Database, payout_id: &str) -> ApiResult<()> {
+    let id = Uuid::parse_str(payout_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Get payout details to refund the wallet
+    let payout: Option<(Uuid, Uuid, f64, String)> = sqlx::query_as(
+        "SELECT id, agent_id, amount::float8, status FROM payout_requests WHERE id = $1"
+    )
+        .bind(id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (payout_uuid, agent_id, amount, status) = match payout {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Payout not found".into())),
+    };
+
+    if status != "pending" {
+        return Err(ApiError::BadRequest(format!("Cannot reject payout with status: {}", status)));
+    }
+
+    let mut tx = pool(db).begin().await?;
+
+    // Refund the wallet
+    crate::services::wallet::credit_wallet(
+        &mut tx,
+        &agent_id,
+        amount,
+        &payout_uuid.to_string(),
+        &format!("Payout {} rejected - funds refunded", payout_id),
+    ).await?;
+
+    // Mark as rejected
+    sqlx::query(
+        "UPDATE payout_requests SET status = 'rejected', processed_at = NOW() WHERE id = $1"
+    )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    tracing::info!("❌ Payout {} rejected, KES {:.2} refunded to agent", payout_id, amount);
+    Ok(())
+}

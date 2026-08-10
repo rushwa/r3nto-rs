@@ -1,79 +1,131 @@
 use dioxus::prelude::*;
-
-use crate::api::admin::{get_commissions, Commission};
-use crate::components::sidebar::{PageHeader, StatCard, StatusBadge, DataTable, EmptyState};
+use crate::components::sidebar::{PageHeader, StatCard, EmptyState};
 use crate::context::admin_auth::use_admin_auth;
+use crate::api::admin::get_my_commissions_summary;
 
 #[component]
 pub fn CommissionsPage() -> Element {
     let auth = use_admin_auth();
     let token = auth.read().token.clone().unwrap_or_default();
-    let token_for_resource = token.clone();
 
-    let commissions = use_resource(move || {
-        let t = token_for_resource.clone();
-        async move {
-            if t.is_empty() {
-                return Ok(vec![]);
+    let mut summary = use_signal(|| None::<serde_json::Value>);
+    let mut loading = use_signal(|| true);
+
+    use_effect(move || {
+        let t = token.clone();
+        spawn(async move {
+            match get_my_commissions_summary(&t).await {
+                Ok(data) => summary.set(Some(data)),
+                Err(e) => {
+                    tracing::error!("Failed to load commissions: {}", e);
+                }
             }
-            get_commissions(&t).await
-        }
+            loading.set(false);
+        });
     });
 
-    let comm_ref = commissions.read();
-    let comm_data = match comm_ref.as_ref() {
-        Some(Ok(d)) => Some(d.clone()),
-        _ => None,
-    };
+    if *loading.read() {
+        return rsx! {
+            div { class: "flex items-center justify-center h-96",
+                div { class: "text-white text-lg", "Loading commissions..." }
+            }
+        };
+    }
+
+    let wallet = summary.read().as_ref()
+        .and_then(|s| s.get("wallet"))
+        .cloned()
+        .unwrap_or(serde_json::json!({
+            "balance": 0.0,
+            "total_earned": 0.0,
+            "pending_balance": 0.0,
+            "total_withdrawn": 0.0,
+        }));
+
+    let recent_commissions = summary.read().as_ref()
+        .and_then(|s| s.get("recent_commissions"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let balance = wallet.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let total_earned = wallet.get("total_earned").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let pending = wallet.get("pending_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let withdrawn = wallet.get("total_withdrawn").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     rsx! {
         div { class: "space-y-6",
-            PageHeader { title: "Commissions".to_string(), subtitle: "Track and manage agent commissions".to_string() }
-
-            div { class: "grid grid-cols-1 md:grid-cols-4 gap-4",
-                StatCard { title: "Total Paid".to_string(), value: "$12,450".to_string(), icon: "💰".to_string(), change: "+8%".to_string(), change_positive: true }
-                StatCard { title: "Pending".to_string(), value: "$3,210".to_string(), icon: "⏳".to_string(), change: "+2%".to_string(), change_positive: true }
-                StatCard { title: "This Month".to_string(), value: "$4,890".to_string(), icon: "📅".to_string(), change: "+15%".to_string(), change_positive: true }
-                StatCard { title: "Avg Commission".to_string(), value: "$285".to_string(), icon: "📊".to_string(), change: "-3%".to_string(), change_positive: false }
+            PageHeader {
+                title: "My Commissions".to_string(),
+                subtitle: "Track your earnings and wallet balance".to_string(),
             }
 
-            if let Some(data) = &comm_data {
-                if data.is_empty() {
-                    EmptyState { icon: "💰".to_string(), title: "No commissions found".to_string(), message: "Commissions will appear here when transactions occur.".to_string() }
+            // Wallet Stats
+            div { class: "grid grid-cols-1 md:grid-cols-4 gap-4",
+                div { class: "bg-gradient-to-br from-green-900/40 to-gray-800 rounded-lg border border-green-500/30 p-6",
+                    p { class: "text-green-400 text-sm", "💰 Available Balance" }
+                    p { class: "text-3xl font-bold text-white mt-2", "KES {balance as i32}" }
+                    p { class: "text-gray-400 text-xs mt-1", "Ready for payout" }
+                }
+                div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                    p { class: "text-gray-400 text-sm", "Total Earned" }
+                    p { class: "text-2xl font-bold text-white mt-2", "KES {total_earned as i32}" }
+                }
+                div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                    p { class: "text-gray-400 text-sm", "Pending" }
+                    p { class: "text-2xl font-bold text-yellow-400 mt-2", "KES {pending as i32}" }
+                }
+                div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                    p { class: "text-gray-400 text-sm", "Total Withdrawn" }
+                    p { class: "text-2xl font-bold text-blue-400 mt-2", "KES {withdrawn as i32}" }
+                }
+            }
+
+            // Recent Commissions
+            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
+                h2 { class: "text-xl font-bold text-white mb-4", "Recent Commissions" }
+                if recent_commissions.is_empty() {
+                    EmptyState {
+                        icon: "💸".to_string(),
+                        title: "No commissions yet".to_string(),
+                        message: "Complete property conversions to start earning commissions.".to_string(),
+                    }
                 } else {
-                    DataTable {
-                        headers: vec!["ID".to_string(), "Agent".to_string(), "Property".to_string(), "Amount".to_string(), "Status".to_string(), "Date".to_string()],
-                        for comm in data.iter() {
-                            tr { class: "hover:bg-gray-700/30 transition-colors",
-                                td { class: "px-4 py-3 text-gray-400 font-mono text-xs",
-                                    {comm.id.chars().take(8).collect::<String>()}
-                                }
-                                td { class: "px-4 py-3 text-white text-sm", "{comm.agent}" }
-                                td { class: "px-4 py-3 text-gray-300 text-sm", "{comm.property}" }
-                                td { class: "px-4 py-3 text-white text-sm font-medium", "${comm.amount:.2}" }
-                                td { class: "px-4 py-3",
-                                    StatusBadge { status: comm.status.clone() }
-                                }
-                                td { class: "px-4 py-3 text-gray-400 text-sm", "{comm.date}" }
-                            }
+                    div { class: "space-y-2",
+                        for commission in recent_commissions.iter() {
+                            CommissionRow { commission: commission.clone() }
                         }
                     }
                 }
-            } else if comm_ref.as_ref().is_none() {
-                div { class: "bg-gray-800 rounded-lg border border-gray-700 animate-pulse",
-                    for _ in 0..5 {
-                        div { class: "px-4 py-3 flex items-center gap-4",
-                            div { class: "flex-1 space-y-2",
-                                div { class: "h-4 bg-gray-700 rounded w-1/6" }
-                                div { class: "h-4 bg-gray-700 rounded w-1/4" }
-                            }
-                        }
-                    }
-                }
-            } else {
-                div { class: "bg-gray-800 rounded-lg border border-gray-700 p-8 text-center",
-                    p { class: "text-red-400", "Failed to load commissions" }
-                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CommissionRow(commission: serde_json::Value) -> Element {
+    let commission_type = commission.get("type").and_then(|v| v.as_str()).unwrap_or("—");
+    let amount = commission.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let gross = commission.get("gross_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let status = commission.get("status").and_then(|v| v.as_str()).unwrap_or("—");
+    let created_at = commission.get("created_at").and_then(|v| v.as_str()).unwrap_or("—");
+    let date_display = if created_at.len() > 10 { &created_at[..10] } else { created_at };
+
+    let type_display = match commission_type {
+        "registration_30pct" => "Registration Fee (30%)",
+        "renewal_10pct" => "Renewal (10%)",
+        _ => commission_type,
+    };
+
+    rsx! {
+        div { class: "flex items-center justify-between p-4 bg-gray-900 rounded-lg border border-gray-700",
+            div { class: "flex-1",
+                p { class: "text-white font-medium", "{type_display}" }
+                p { class: "text-gray-400 text-sm", "On KES {gross as i32} payment • {date_display}" }
+            }
+            div { class: "text-right",
+                p { class: "text-green-400 font-bold text-lg", "+KES {amount as i32}" }
+                span { class: "text-xs text-gray-500 capitalize", "{status}" }
             }
         }
     }

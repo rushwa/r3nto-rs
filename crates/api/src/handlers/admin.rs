@@ -88,6 +88,238 @@ pub async fn verify_handshake(
     })))
 }
 
+
+#[derive(Deserialize)]
+pub struct PayoutActionRequest {
+    pub payout_id: String,
+}
+
+pub async fn get_pending_payouts(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let payouts = admin_service::get_pending_payouts(&state.db).await?;
+    Ok(Json(payouts))
+}
+
+pub async fn approve_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<PayoutActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can approve payouts".to_string()));
+    }
+    admin_service::approve_payout(&state.db, &req.payout_id).await?;
+    Ok(Json(serde_json::json!({ "message": "Payout approved" })))
+}
+
+pub async fn reject_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<PayoutActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can reject payouts".to_string()));
+    }
+    admin_service::reject_payout(&state.db, &req.payout_id).await?;
+    Ok(Json(serde_json::json!({ "message": "Payout rejected and funds refunded" })))
+}
+
+#[derive(Deserialize)]
+pub struct SubscribeRequest {
+    pub plan_id: String,
+    pub property_id: String,
+}
+
+pub async fn subscribe_property(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<SubscribeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    // Verify user is a PROPERTY_OWNER
+    let user_role: String = sqlx::query_scalar(
+        "SELECT role::text FROM account_users WHERE id = $1"
+    )
+        .bind(user_id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("User not found".into()))?;
+
+    if user_role.to_uppercase() != "PROPERTY_OWNER" {
+        return Err(ApiError::BadRequest("Only property owners can subscribe".into()));
+    }
+
+    let plan_id = Uuid::parse_str(&req.plan_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid plan ID: {}", e)))?;
+    let property_id = Uuid::parse_str(&req.property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+
+    // Verify property belongs to this user
+    let owner_check: Option<Uuid> = sqlx::query_scalar(
+        "SELECT owner_id FROM properties WHERE id = $1"
+    )
+        .bind(property_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+
+    match owner_check {
+        Some(id) if id == user_id => {},
+        Some(_) => return Err(ApiError::BadRequest("Property does not belong to you".into())),
+        None => return Err(ApiError::NotFound("Property not found".into())),
+    }
+
+    // Get plan details
+    let plan: Option<(String, f64, String)> = sqlx::query_as(
+        "SELECT name, price::float8, duration::text FROM subscription_plans WHERE id = $1 AND is_active = true"
+    )
+        .bind(plan_id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+
+    let (plan_name, price, duration) = match plan {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Plan not found or inactive".into())),
+    };
+
+    // Calculate end date based on duration
+    let now = chrono::Utc::now();
+    let end_date = match duration.as_str() {
+        "monthly" => now + chrono::Duration::days(30),
+        "quarterly" => now + chrono::Duration::days(90),
+        "yearly" => now + chrono::Duration::days(365),
+        "permanent" => now + chrono::Duration::days(36500),
+        _ => now + chrono::Duration::days(30),
+    };
+
+    // Create subscription
+    let subscription_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO property_subscriptions
+            (id, property_id, plan_id, status, amount_paid, payment_status, start_date, end_date)
+        VALUES ($1, $2, $3, 'active', $4, 'completed', $5, $6)
+        "#
+    )
+        .bind(subscription_id)
+        .bind(property_id)
+        .bind(plan_id)
+        .bind(price)
+        .bind(now)
+        .bind(end_date)
+        .execute(&state.db.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create subscription: {}", e)))?;
+
+    // Update property subscription status
+    sqlx::query(
+        "UPDATE properties SET subscription_status = 'active', subscription_tier = $1, subscription_start_date = $2, subscription_end_date = $3 WHERE id = $4"
+    )
+        .bind(&duration)
+        .bind(now)
+        .bind(end_date)
+        .bind(property_id)
+        .execute(&state.db.pool)
+        .await?;
+
+    tracing::info!("✅ Property {} subscribed to {} plan", property_id, plan_name);
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Successfully subscribed to {} plan", plan_name),
+        "subscription_id": subscription_id.to_string(),
+        "plan_name": plan_name,
+        "amount_paid": price,
+        "end_date": end_date.to_string()
+    })))
+}
+
+pub async fn get_my_subscriptions(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            ps.id::text, ps.property_id::text, ps.plan_id::text,
+            ps.status::text, ps.amount_paid::float8,
+            ps.start_date, ps.end_date,
+            p.title as property_title,
+            sp.name as plan_name, sp.tier::text as plan_tier, sp.price::float8 as plan_price
+        FROM property_subscriptions ps
+        JOIN properties p ON ps.property_id = p.id
+        JOIN subscription_plans sp ON ps.plan_id = sp.id
+        WHERE p.owner_id = $1
+        ORDER BY ps.created_at DESC
+        "#
+    )
+        .bind(user_id)
+        .fetch_all(&state.db.pool)
+        .await?;
+
+    let subscriptions: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "property_id": row.try_get::<String, _>("property_id").unwrap_or_default(),
+            "property_title": row.try_get::<String, _>("property_title").unwrap_or_default(),
+            "plan_name": row.try_get::<String, _>("plan_name").unwrap_or_default(),
+            "plan_tier": row.try_get::<String, _>("plan_tier").unwrap_or_default(),
+            "plan_price": row.try_get::<f64, _>("plan_price").unwrap_or(0.0),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "amount_paid": row.try_get::<f64, _>("amount_paid").unwrap_or(0.0),
+            "start_date": row.try_get::<chrono::DateTime<chrono::Utc>, _>("start_date")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "end_date": row.try_get::<chrono::DateTime<chrono::Utc>, _>("end_date")
+                .map(|d| d.to_string()).unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(Json(subscriptions))
+}
+pub async fn get_my_commissions_summary(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    // Get wallet info
+    let wallet = crate::services::wallet::get_or_create_wallet(&state.db.pool, &agent_id).await?;
+
+    // Get recent commissions from ledger
+    let recent_commissions = crate::services::commissions::get_agent_commissions(&state.db.pool, &agent_id).await?;
+
+    // Count stats
+    let total_earned = wallet.total_earned;
+    let current_balance = wallet.balance;
+    let commission_count = recent_commissions.len();
+
+    Ok(Json(serde_json::json!({
+        "wallet": {
+            "balance": current_balance,
+            "total_earned": total_earned,
+            "pending_balance": wallet.pending_balance,
+            "total_withdrawn": wallet.total_withdrawn,
+        },
+        "recent_commissions": recent_commissions.iter().take(5).map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "type": c.commission_type,
+                "amount": c.commission_amount,
+                "gross_amount": c.gross_amount,
+                "status": c.status,
+                "created_at": c.created_at,
+            })
+        }).collect::<Vec<_>>(),
+        "total_commission_count": commission_count,
+    })))
+}
 #[derive(Deserialize)]
 pub struct CreatePropertyRequest {
     pub title: String,

@@ -26,7 +26,7 @@ use crate::pages::property_owners::PropertyOwnersPage;
 use crate::pages::agent_leads::LeadsPage;
 use crate::pages::agent_conversion::ConversionPage;
 use crate::pages::property_owner_dashboard::PropertyOwnerDashboard;
-
+use crate::pages::payouts::PayoutsPage;
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 pub enum AdminRoute {
@@ -54,6 +54,8 @@ pub enum AdminRoute {
         SubscriptionsPage,
         #[route("/commissions")]
         CommissionsPage,
+        #[route("/payouts")]
+        PayoutsPage,
         #[route("/inquiries")]
         InquiriesPage,
         #[route("/analytics")]

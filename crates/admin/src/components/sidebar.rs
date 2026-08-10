@@ -59,11 +59,12 @@ pub fn AdminSidebar() -> Element {
                     // 1. COMMON LINKS (Everyone with is_staff=true can see these)
                     SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
                     SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
-                    SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "Commissions" }
+                    SidebarLink { to: crate::AdminRoute::SubscriptionsPage, icon: "⭐", label: "Subscriptions" }
 
                     // 2. AGENT SPECIFIC (Agents, Admins, and Superusers can manage leads/conversions)
                     if is_agent || is_admin || is_superuser {
                         SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
+                        SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "My Commissions" }
                         SidebarLink { to: crate::AdminRoute::ConversionPage, icon: "🤝", label: "Conversion" }
                     }
 
@@ -74,6 +75,7 @@ pub fn AdminSidebar() -> Element {
                         p { class: "px-4 text-xs text-gray-500 uppercase font-semibold", "Management" }
                         SidebarLink { to: crate::AdminRoute::UsersPage, icon: "👤", label: "Users" }
                         SidebarLink { to: crate::AdminRoute::AgentsPage, icon: "🏢", label: "Agents" }
+                        SidebarLink { to: crate::AdminRoute::PayoutsPage, icon: "💸", label: "Agent Payouts" }
                         SidebarLink { to: crate::AdminRoute::PropertyOwnersPage, icon: "🏘️", label: "Property Owners" }
                         SidebarLink { to: crate::AdminRoute::SubscriptionsPage, icon: "💳", label: "Subscriptions" }
                         SidebarLink { to: crate::AdminRoute::InquiriesPage, icon: "📨", label: "Inquiries" }

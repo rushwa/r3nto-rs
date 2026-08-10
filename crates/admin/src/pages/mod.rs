@@ -15,3 +15,4 @@ pub mod not_found;
 pub mod agent_leads;
 pub mod agent_conversion;
 pub(crate) mod property_owner_dashboard;
+pub(crate) mod payouts;

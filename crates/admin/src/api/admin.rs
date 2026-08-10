@@ -110,6 +110,7 @@ pub struct ActivityItem {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+#[derive(PartialEq)]
 pub struct SubscriptionPlan {
     pub id: String,
     pub name: String,
@@ -327,10 +328,6 @@ pub async fn get_properties(token: &str) -> Result<Vec<Property>, String> {
 //     fetch_json(&format!("/admin/properties/{}", id), "GET", Some(token), None).await
 // }
 
-pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
-    fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
-}
-
 pub async fn get_commissions(token: &str) -> Result<Vec<Commission>, String> {
     fetch_json("/admin/commissions", "GET", Some(token), None).await
 }
@@ -470,4 +467,42 @@ pub async fn verify_handshake(token: &str, target_user_id: &str, target_email: &
     ).await?;
 
     Ok(())
+}
+
+pub async fn get_pending_payouts(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/payouts", "GET", Some(token), None).await
+}
+
+pub async fn approve_payout(token: &str, payout_id: &str) -> Result<(), String> {
+    let body = serde_json::to_string(&serde_json::json!({ "payout_id": payout_id }))
+        .map_err(|e| e.to_string())?;
+    let _: serde_json::Value = fetch_json("/admin/payouts/approve", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+
+pub async fn reject_payout(token: &str, payout_id: &str) -> Result<(), String> {
+    let body = serde_json::to_string(&serde_json::json!({ "payout_id": payout_id }))
+        .map_err(|e| e.to_string())?;
+    let _: serde_json::Value = fetch_json("/admin/payouts/reject", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+
+pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
+    fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
+}
+
+pub async fn subscribe_property(token: &str, plan_id: &str, property_id: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "plan_id": plan_id,
+        "property_id": property_id
+    })).map_err(|e| e.to_string())?;
+    fetch_json("/admin/subscriptions/subscribe", "POST", Some(token), Some(body)).await
+}
+
+pub async fn get_my_subscriptions(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/subscriptions/my", "GET", Some(token), None).await
+}
+
+pub async fn get_my_commissions_summary(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/commissions/my/summary", "GET", Some(token), None).await
 }

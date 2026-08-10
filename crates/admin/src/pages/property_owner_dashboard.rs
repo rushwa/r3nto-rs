@@ -6,44 +6,32 @@ use crate::context::admin_auth::use_admin_auth;
 pub fn PropertyOwnerDashboard() -> Element {
     let auth = use_admin_auth();
     let token = auth.read().token.clone().unwrap_or_default();
-    let token_for_effect = token.clone(); // ✅ FIX E0382: clone for use_effect
 
-    // ───────────────────────────────────────────
-    // State
-    // ───────────────────────────────────────────
     let mut reg_fee_status = use_signal(|| None::<serde_json::Value>);
     let mut properties = use_signal(|| Vec::<serde_json::Value>::new());
     let mut loading = use_signal(|| true);
     let mut show_payment_modal = use_signal(|| false);
-
-    // Trigger signal: increment to refetch data
+    let mut show_add_property_modal = use_signal(|| false);
     let mut fetch_trigger = use_signal(|| 0u32);
 
-    // ───────────────────────────────────────────
-    // Single use_effect that fetches whenever fetch_trigger changes
-    // ───────────────────────────────────────────
+    // ✅ FIX: Clone token before use_effect
+    let token_for_effect = token.clone();
+
     use_effect(move || {
-        // Subscribe to fetch_trigger changes
         let _trigger = *fetch_trigger.read();
-        let t = token_for_effect.clone(); // ✅ FIX E0382: use cloned token
-
+        let t = token_for_effect.clone();
         loading.set(true);
-
         spawn(async move {
-            // 1. Fetch registration fee status
             let status_res = reqwest::Client::new()
                 .get("http://localhost:8000/admin/registration-fee/status")
                 .header("Authorization", format!("Bearer {}", t))
                 .send()
                 .await;
-
             if let Ok(resp) = status_res {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     reg_fee_status.set(Some(json));
                 }
             }
-
-            // 2. If fee paid, fetch properties
             let has_paid = {
                 let status = reg_fee_status.read();
                 status.as_ref()
@@ -51,28 +39,22 @@ pub fn PropertyOwnerDashboard() -> Element {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
             };
-
             if has_paid {
                 let props_res = reqwest::Client::new()
                     .get("http://localhost:8000/admin/properties")
                     .header("Authorization", format!("Bearer {}", t))
                     .send()
                     .await;
-
                 if let Ok(resp) = props_res {
                     if let Ok(json) = resp.json::<Vec<serde_json::Value>>().await {
                         properties.set(json);
                     }
                 }
             }
-
             loading.set(false);
         });
     });
 
-    // ───────────────────────────────────────────
-    // Derived state (computed from signals)
-    // ───────────────────────────────────────────
     let has_paid = {
         let status = reg_fee_status.read();
         status.as_ref()
@@ -80,7 +62,6 @@ pub fn PropertyOwnerDashboard() -> Element {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     };
-
     let fee_amount = {
         let status = reg_fee_status.read();
         status.as_ref()
@@ -88,7 +69,6 @@ pub fn PropertyOwnerDashboard() -> Element {
             .and_then(|v| v.as_f64())
             .unwrap_or(1000.0)
     };
-
     let status_message = {
         let status = reg_fee_status.read();
         status.as_ref()
@@ -98,9 +78,6 @@ pub fn PropertyOwnerDashboard() -> Element {
             .to_string()
     };
 
-    // ───────────────────────────────────────────
-    // Loading state
-    // ───────────────────────────────────────────
     if *loading.read() {
         return rsx! {
             div { class: "flex items-center justify-center h-96",
@@ -109,9 +86,6 @@ pub fn PropertyOwnerDashboard() -> Element {
         };
     }
 
-    // ───────────────────────────────────────────
-    // Main render
-    // ───────────────────────────────────────────
     rsx! {
         div { class: "space-y-6",
             PageHeader {
@@ -119,15 +93,12 @@ pub fn PropertyOwnerDashboard() -> Element {
                 subtitle: "Manage your properties and subscription".to_string(),
             }
 
-            // Registration Fee Banner (if not paid)
             if !has_paid {
                 div { class: "bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-6",
                     div { class: "flex items-start gap-4",
                         span { class: "text-4xl", "⚠️" }
                         div { class: "flex-1",
-                            h3 { class: "text-yellow-400 font-semibold text-lg mb-2",
-                                "Registration Fee Required"
-                            }
+                            h3 { class: "text-yellow-400 font-semibold text-lg mb-2", "Registration Fee Required" }
                             p { class: "text-gray-300 mb-4", "{status_message}" }
                             button {
                                 class: "px-6 py-2.5 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg font-medium transition-colors",
@@ -139,7 +110,6 @@ pub fn PropertyOwnerDashboard() -> Element {
                 }
             }
 
-            // Stats Cards (only if fee paid)
             if has_paid {
                 div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                     StatCard {
@@ -169,16 +139,13 @@ pub fn PropertyOwnerDashboard() -> Element {
                 }
             }
 
-            // Properties Section
             if has_paid {
                 div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
                     div { class: "flex items-center justify-between mb-6",
                         h2 { class: "text-xl font-bold text-white", "My Properties" }
                         button {
                             class: "px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors",
-                            onclick: move |_| {
-                                tracing::info!("Navigate to create property form");
-                            },
+                            onclick: move |_| show_add_property_modal.set(true),
                             "+ Add Property"
                         }
                     }
@@ -200,26 +167,32 @@ pub fn PropertyOwnerDashboard() -> Element {
             } else {
                 div { class: "bg-gray-800 rounded-lg border border-gray-700 p-12 text-center",
                     span { class: "text-6xl", "🔒" }
-                    h3 { class: "text-xl font-bold text-white mt-4 mb-2",
-                        "Property Management Locked"
-                    }
+                    h3 { class: "text-xl font-bold text-white mt-4 mb-2", "Property Management Locked" }
                     p { class: "text-gray-400 max-w-md mx-auto",
                         "Complete the registration fee payment to unlock property management features."
                     }
                 }
             }
 
-            // Payment Modal
+            // ✅ FIX: Clone token for each modal separately
             if *show_payment_modal.read() {
                 PaymentModal {
                     fee_amount,
                     token: token.clone(),
-                    on_close: move |_| {
-                        show_payment_modal.set(false);
-                    },
+                    on_close: move |_| show_payment_modal.set(false),
                     on_success: move |_| {
                         show_payment_modal.set(false);
-                        // Trigger a refetch by incrementing the trigger signal
+                        fetch_trigger += 1;
+                    },
+                }
+            }
+
+            if *show_add_property_modal.read() {
+                AddPropertyModal {
+                    token: token.clone(),
+                    on_close: move |_| show_add_property_modal.set(false),
+                    on_success: move |_| {
+                        show_add_property_modal.set(false);
                         fetch_trigger += 1;
                     },
                 }
@@ -228,9 +201,191 @@ pub fn PropertyOwnerDashboard() -> Element {
     }
 }
 
-// ───────────────────────────────────────────
-// Property Card Component
-// ───────────────────────────────────────────
+#[component]
+fn AddPropertyModal(
+    token: String,
+    on_close: EventHandler<()>,
+    on_success: EventHandler<()>,
+) -> Element {
+    let mut title = use_signal(|| String::new());
+    let mut description = use_signal(|| String::new());
+    let mut price = use_signal(|| String::new());
+    let mut property_type = use_signal(|| "apartment".to_string());
+    let mut county = use_signal(|| String::new());
+    let mut location = use_signal(|| String::new());
+    let mut plot_number = use_signal(|| String::new());
+    let mut loading = use_signal(|| false);
+    let mut error_message = use_signal(|| Option::<String>::None);
+
+    // ✅ FIX: Clone token before moving into closure
+    let token_for_submit = token.clone();
+    let handle_submit = move |_| {
+        if title.read().is_empty() {
+            error_message.set(Some("Property title is required".to_string()));
+            return;
+        }
+        if county.read().is_empty() {
+            error_message.set(Some("County is required".to_string()));
+            return;
+        }
+
+        loading.set(true);
+        error_message.set(None);
+
+        let t = token_for_submit.clone();
+        let payload = serde_json::json!({
+            "title": title.read().clone(),
+            "description": description.read().clone(),
+            "price": price.read().parse::<f64>().unwrap_or(0.0),
+            "property_type": property_type.read().clone(),
+            "county": county.read().clone(),
+            "location": location.read().clone(),
+            "plot_number": plot_number.read().clone(),
+        });
+
+        spawn(async move {
+            let res = reqwest::Client::new()
+                .post("http://localhost:8000/admin/properties")
+                .header("Authorization", format!("Bearer {}", t))
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await;
+
+            loading.set(false);
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    on_success.call(());
+                }
+                Ok(resp) => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("Failed to create property");
+                        error_message.set(Some(err.to_string()));
+                    }
+                }
+                Err(e) => {
+                    error_message.set(Some(format!("Network error: {}", e)));
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4",
+            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto",
+                div { class: "flex items-center justify-between mb-4",
+                    h3 { class: "text-xl font-bold text-white", "Add New Property" }
+                    button {
+                        class: "text-gray-400 hover:text-white text-2xl leading-none",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+
+                div { class: "space-y-4",
+                    div {
+                        label { class: "block text-sm font-medium text-gray-400 mb-1", "Property Title *" }
+                        input {
+                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                            placeholder: "e.g., Modern 2-Bedroom Apartment in Westlands",
+                            value: "{title}",
+                            oninput: move |evt| title.set(evt.value()),
+                        }
+                    }
+
+                    div {
+                        label { class: "block text-sm font-medium text-gray-400 mb-1", "Description" }
+                        textarea {
+                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                            rows: "3",
+                            placeholder: "Describe your property...",
+                            value: "{description}",
+                            oninput: move |evt| description.set(evt.value()),
+                        }
+                    }
+
+                    div { class: "grid grid-cols-2 gap-4",
+                        div {
+                            label { class: "block text-sm font-medium text-gray-400 mb-1", "Price (KES)" }
+                            input {
+                                class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                                r#type: "number",
+                                placeholder: "50000",
+                                value: "{price}",
+                                oninput: move |evt| price.set(evt.value()),
+                            }
+                        }
+                        div {
+                            label { class: "block text-sm font-medium text-gray-400 mb-1", "Property Type" }
+                            select {
+                                class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                                value: "{property_type}",
+                                onchange: move |evt| property_type.set(evt.value()),
+                                option { value: "apartment", "Apartment" }
+                                option { value: "house", "House" }
+                                option { value: "commercial", "Commercial" }
+                                option { value: "land", "Land" }
+                            }
+                        }
+                    }
+
+                    div { class: "grid grid-cols-2 gap-4",
+                        div {
+                            label { class: "block text-sm font-medium text-gray-400 mb-1", "County *" }
+                            input {
+                                class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                                placeholder: "Nairobi",
+                                value: "{county}",
+                                oninput: move |evt| county.set(evt.value()),
+                            }
+                        }
+                        div {
+                            label { class: "block text-sm font-medium text-gray-400 mb-1", "Location/Area" }
+                            input {
+                                class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                                placeholder: "Westlands",
+                                value: "{location}",
+                                oninput: move |evt| location.set(evt.value()),
+                            }
+                        }
+                    }
+
+                    div {
+                        label { class: "block text-sm font-medium text-gray-400 mb-1", "Plot Number" }
+                        input {
+                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
+                            placeholder: "LR No. 1234/567",
+                            value: "{plot_number}",
+                            oninput: move |evt| plot_number.set(evt.value()),
+                        }
+                    }
+
+                    if let Some(err) = error_message.read().as_ref() {
+                        div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-3",
+                            p { class: "text-red-400 text-sm", "❌ {err}" }
+                        }
+                    }
+
+                    div { class: "flex gap-2 pt-4",
+                        button {
+                            class: "flex-1 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium",
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium disabled:opacity-50",
+                            disabled: *loading.read(),
+                            onclick: handle_submit,
+                            if *loading.read() { "Creating..." } else { "Create Property" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn PropertyCard(property: serde_json::Value) -> Element {
     let title = property.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
@@ -263,10 +418,6 @@ fn PropertyCard(property: serde_json::Value) -> Element {
     }
 }
 
-// ───────────────────────────────────────────
-// Payment Modal Component (Clean & Secure)
-// Uses EventHandler<()> — Dioxus's idiomatic callback pattern
-// ───────────────────────────────────────────
 #[component]
 fn PaymentModal(
     fee_amount: f64,
@@ -279,7 +430,6 @@ fn PaymentModal(
     let mut error_message = use_signal(|| Option::<String>::None);
     let mut success_message = use_signal(|| Option::<String>::None);
 
-    // Validate phone format client-side (defense in depth; server also validates)
     let is_valid_phone = {
         let phone = phone_number.read().clone();
         let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -288,31 +438,28 @@ fn PaymentModal(
             || (digits.starts_with("7") && digits.len() == 9)
     };
 
+    // ✅ FIX: Clone token before moving into closure
+    let token_for_payment = token.clone();
     let handle_payment = move |_| {
         let phone = phone_number.read().clone();
-
-        // Client-side validation
         if phone.is_empty() {
             error_message.set(Some("Please enter your M-Pesa phone number".to_string()));
             return;
         }
         if !is_valid_phone {
-            error_message.set(Some("Invalid phone format. Use: 07XXXXXXXX or 2547XXXXXXXX".to_string()));
+            error_message.set(Some("Invalid phone format".to_string()));
             return;
         }
-
         loading.set(true);
         error_message.set(None);
         success_message.set(None);
 
-        // Clone values before moving into async block
-        let t = token.clone();
+        let t = token_for_payment.clone();
         let fee = fee_amount;
-        // EventHandler is Clone — this is the key pattern
         let success_handler = on_success.clone();
-        let mut loading_signal = loading.clone();
-        let mut error_signal = error_message.clone();
-        let mut success_signal = success_message.clone();
+        let mut loading_signal = loading;
+        let mut error_signal = error_message;
+        let mut success_signal = success_message;
 
         spawn(async move {
             let payload = serde_json::json!({
@@ -321,7 +468,6 @@ fn PaymentModal(
                 "payment_type": "registration_fee",
                 "account_reference": "RENTO-REG"
             });
-
             let res = reqwest::Client::new()
                 .post("http://localhost:8000/api/payments/registration-fee")
                 .header("Authorization", format!("Bearer {}", t))
@@ -329,29 +475,16 @@ fn PaymentModal(
                 .json(&payload)
                 .send()
                 .await;
-
             loading_signal.set(false);
-
             match res {
                 Ok(resp) if resp.status().is_success() => {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        let msg = json.get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Payment successful! Check your phone for the STK Push.");
-                        success_signal.set(Some(msg.to_string()));
-                        // Notify parent to refetch data
-                        success_handler.call(());
-                    }
+                    success_signal.set(Some("Payment successful!".to_string()));
+                    success_handler.call(());
                 }
                 Ok(resp) => {
-                    let status = resp.status();
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        let err = json.get("error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Payment failed");
+                        let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("Payment failed");
                         error_signal.set(Some(err.to_string()));
-                    } else {
-                        error_signal.set(Some(format!("Payment failed (HTTP {})", status)));
                     }
                 }
                 Err(e) => {
@@ -362,14 +495,8 @@ fn PaymentModal(
     };
 
     rsx! {
-        div {
-            class: "fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4",
-            // ✅ FIX E0599: Click backdrop to close; stop_propagation on inner card
-            onclick: move |_| on_close.call(()),
-            div {
-                class: "bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-md w-full",
-                onclick: move |evt| evt.stop_propagation(),
-                // Header
+        div { class: "fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4",
+            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-md w-full",
                 div { class: "flex items-center justify-between mb-4",
                     h3 { class: "text-xl font-bold text-white", "Pay Registration Fee" }
                     button {
@@ -378,23 +505,14 @@ fn PaymentModal(
                         "×"
                     }
                 }
-
-                // Amount info
                 div { class: "bg-blue-900/20 border border-blue-500/30 rounded-lg p-4 mb-4",
                     p { class: "text-blue-400 font-semibold text-lg", "Amount: KES {fee_amount as i32}" }
-                    p { class: "text-gray-300 text-sm mt-1",
-                        "One-time fee to activate your property listings."
-                    }
                 }
-
-                // Form
                 div { class: "space-y-4",
                     div {
-                        label { class: "block text-sm font-medium text-gray-400 mb-1",
-                            "M-Pesa Phone Number"
-                        }
+                        label { class: "block text-sm font-medium text-gray-400 mb-1", "M-Pesa Phone Number" }
                         input {
-                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors",
+                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
                             r#type: "tel",
                             placeholder: "254712345678",
                             value: "{phone_number}",
@@ -403,35 +521,22 @@ fn PaymentModal(
                                 error_message.set(None);
                             },
                         }
-                        p { class: "text-gray-500 text-xs mt-1",
-                            "Format: 07XXXXXXXX or 2547XXXXXXXX"
-                        }
                     }
-
-                    // Error message
                     if let Some(err) = error_message.read().as_ref() {
                         div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-3",
                             p { class: "text-red-400 text-sm", "❌ {err}" }
                         }
                     }
-
-                    // Success message
                     if let Some(msg) = success_message.read().as_ref() {
                         div { class: "bg-green-900/20 border border-green-500/30 rounded-lg p-3",
                             p { class: "text-green-400 text-sm", "✅ {msg}" }
                         }
                     }
-
-                    // Submit button
                     button {
-                        class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                        class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium disabled:opacity-50",
                         disabled: *loading.read() || !is_valid_phone,
                         onclick: handle_payment,
                         if *loading.read() { "Processing..." } else { "Pay Now" }
-                    }
-
-                    p { class: "text-gray-500 text-xs text-center",
-                        "You'll receive an STK Push on your phone. Enter your M-Pesa PIN to complete."
                     }
                 }
             }
