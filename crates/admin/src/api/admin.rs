@@ -491,18 +491,51 @@ pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>
     fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
 }
 
-pub async fn subscribe_property(token: &str, plan_id: &str, property_id: &str) -> Result<serde_json::Value, String> {
-    let body = serde_json::to_string(&serde_json::json!({
-        "plan_id": plan_id,
-        "property_id": property_id
-    })).map_err(|e| e.to_string())?;
-    fetch_json("/admin/subscriptions/subscribe", "POST", Some(token), Some(body)).await
-}
 
 pub async fn get_my_subscriptions(token: &str) -> Result<Vec<serde_json::Value>, String> {
     fetch_json("/admin/subscriptions/my", "GET", Some(token), None).await
 }
+pub async fn subscribe_property_with_payment(
+    token: &str,
+    plan_id: &str,
+    property_id: &str,
+    phone_number: &str,
+) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Req {
+        plan_id: String,
+        property_id: String,
+        phone_number: String,
+    }
+    let body = serde_json::to_string(&Req {
+        plan_id: plan_id.to_string(),
+        property_id: property_id.to_string(),
+        phone_number: phone_number.to_string(),
+    }).map_err(|e| e.to_string())?;
+    fetch_json("/admin/subscriptions/subscribe", "POST", Some(token), Some(body)).await
+}
 
+pub async fn get_subscriptions_overview(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/subscriptions/overview", "GET", Some(token), None).await
+}
 pub async fn get_my_commissions_summary(token: &str) -> Result<serde_json::Value, String> {
     fetch_json("/admin/commissions/my/summary", "GET", Some(token), None).await
+}
+// Add these functions to the existing admin.rs API file
+
+pub async fn get_my_properties(token: &str) -> Result<Vec<Property>, String> {
+    fetch_json("/admin/properties", "GET", Some(token), None).await
+}
+
+pub async fn subscribe_property(token: &str, plan_id: &str, property_id: &str) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Req {
+        plan_id: String,
+        property_id: String,
+    }
+    let body = serde_json::to_string(&Req {
+        plan_id: plan_id.to_string(),
+        property_id: property_id.to_string(),
+    }).map_err(|e| e.to_string())?;
+    fetch_json("/admin/subscriptions/subscribe", "POST", Some(token), Some(body)).await
 }

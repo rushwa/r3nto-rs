@@ -27,6 +27,7 @@ use crate::pages::agent_leads::LeadsPage;
 use crate::pages::agent_conversion::ConversionPage;
 use crate::pages::property_owner_dashboard::PropertyOwnerDashboard;
 use crate::pages::payouts::PayoutsPage;
+use crate::pages::owner_profile::OwnerProfilePage;
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 pub enum AdminRoute {
@@ -54,8 +55,8 @@ pub enum AdminRoute {
         SubscriptionsPage,
         #[route("/commissions")]
         CommissionsPage,
-        #[route("/payouts")]
-        PayoutsPage,
+        #[route("/owner-profile")]  // ✅ NEW: Dedicated route for Property Owner profile
+        OwnerProfilePage,
         #[route("/inquiries")]
         InquiriesPage,
         #[route("/analytics")]
@@ -66,6 +67,8 @@ pub enum AdminRoute {
         LeadsPage,
         #[route("/conversion")]
         ConversionPage,
+        #[route("/payouts")]
+        PayoutsPage,
     #[end_layout]
 
     #[route("/:..segments")]
@@ -74,14 +77,12 @@ pub enum AdminRoute {
 
 // ───────────────────────────────────────────
 // Role-Aware Layout
-// Routes users to the right view based on their role
 // ───────────────────────────────────────────
 #[component]
 fn AdminLayout() -> Element {
     let auth = use_admin_auth();
     let nav = use_navigator();
 
-    // Not logged in → show login
     if auth.read().token.is_none() {
         return rsx! { LoginPage {} };
     }
@@ -90,22 +91,10 @@ fn AdminLayout() -> Element {
         .map(|u| u.role.to_uppercase())
         .unwrap_or_default();
 
-    // ───────────────────────────────────────────
-    // PROPERTY_OWNER → Personal Dashboard (no admin sidebar)
-    // ───────────────────────────────────────────
+    // PROPERTY_OWNER → Show specialized sidebar
     if user_role == "PROPERTY_OWNER" {
-        // If they try to access an admin-only route, redirect them
-        let current_route: AdminRoute = use_route();
-        if !matches!(current_route, AdminRoute::PropertyOwnerDashboard { .. }) {
-            // Use an effect to redirect without blocking render
-            use_effect(move || {
-                nav.push(AdminRoute::PropertyOwnerDashboard {});
-            });
-        }
-
         return rsx! {
             div { class: "flex min-h-screen bg-gray-900",
-                // Simplified sidebar for property owners
                 OwnerSidebar {}
                 div { class: "flex-1 ml-64",
                     AdminHeader {}
@@ -117,9 +106,7 @@ fn AdminLayout() -> Element {
         };
     }
 
-    // ───────────────────────────────────────────
-    // AGENT / ADMIN / SUPERUSER → Full Admin Panel
-    // ───────────────────────────────────────────
+    // AGENT / ADMIN / SUPERUSER → Full admin sidebar
     rsx! {
         div { class: "flex min-h-screen bg-gray-900",
             AdminSidebar {}
@@ -134,15 +121,15 @@ fn AdminLayout() -> Element {
 }
 
 // ───────────────────────────────────────────
-// Simplified Sidebar for Property Owners
+// Property Owner Sidebar
 // ───────────────────────────────────────────
 #[component]
 fn OwnerSidebar() -> Element {
     let auth = use_admin_auth();
-    let auth_state = auth.read();
+    let auth_read = auth.read();
     let nav = use_navigator();
 
-    let user_name = auth_state.user.as_ref()
+    let user_name = auth_read.user.as_ref()
         .map(|u| u.name.clone())
         .unwrap_or_else(|| "Owner".to_string());
 
@@ -154,31 +141,77 @@ fn OwnerSidebar() -> Element {
     rsx! {
         aside { class: "fixed left-0 top-0 h-full w-64 bg-gray-800 border-r border-gray-700 overflow-y-auto flex flex-col z-20",
             div { class: "flex-1",
+                // Logo / Brand
                 div { class: "p-6 border-b border-gray-700",
-                    h2 { class: "text-xl font-bold text-white", "Rento Owner Portal" }
-                    p { class: "text-sm text-gray-400 mt-1", "{user_name}" }
-                    p { class: "text-[10px] text-gray-500 mt-1 font-mono", "PROPERTY_OWNER" }
+                    h2 { class: "text-xl font-bold text-white", "🏠 Rento" }
+                    p { class: "text-sm text-gray-400 mt-1", "Owner Portal" }
                 }
 
-                nav { class: "p-4 space-y-2",
-                    Link {
+                // User info
+                div { class: "p-4 border-b border-gray-700",
+                    div { class: "flex items-center gap-3",
+                        div { class: "w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold",
+                            {user_name.chars().next().unwrap_or('O').to_string()}
+                        }
+                        div { class: "flex-1 min-w-0",
+                            p { class: "text-white text-sm font-medium truncate", "{user_name}" }
+                            p { class: "text-gray-500 text-xs", "Property Owner" }
+                        }
+                    }
+                }
+
+                // Navigation
+                nav { class: "p-4 space-y-1",
+                    OwnerSidebarLink {
                         to: AdminRoute::PropertyOwnerDashboard,
-                        class: "flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-700 text-white transition-colors",
-                        active_class: "bg-gray-700",
-                        span { "🏠" }
-                        span { "My Dashboard" }
+                        icon: "📊",
+                        label: "Dashboard",
+                    }
+                    OwnerSidebarLink {
+                        to: AdminRoute::PropertiesPage,
+                        icon: "🏘️",
+                        label: "My Properties",
+                    }
+                    OwnerSidebarLink {
+                        to: AdminRoute::SubscriptionsPage,
+                        icon: "⭐",
+                        label: "Subscriptions",
+                    }
+                    OwnerSidebarLink {
+                        to: AdminRoute::CommissionsPage,
+                        icon: "💰",
+                        label: "Payment History",
+                    }
+                    OwnerSidebarLink {
+                        to: AdminRoute::OwnerProfilePage,
+                        icon: "👤",
+                        label: "My Profile",
                     }
                 }
             }
 
-            div { class: "p-4 border-t border-gray-700 mt-auto",
+            // Logout
+            div { class: "p-4 border-t border-gray-700",
                 button {
-                    class: "w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-red-600/20 text-red-400 hover:text-red-300 transition-colors font-medium",
+                    class: "w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-red-600/20 text-red-400 hover:text-red-300 transition-colors",
                     onclick: handle_logout,
                     span { "🚪" }
-                    span { "Log Out" }
+                    span { class: "font-medium", "Log Out" }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn OwnerSidebarLink(to: AdminRoute, icon: String, label: String) -> Element {
+    rsx! {
+        Link {
+            to: to.clone(),
+            class: "flex items-center gap-3 px-4 py-2.5 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors",
+            active_class: "bg-blue-600/20 text-blue-400 border-l-2 border-blue-400",
+            span { class: "text-lg", "{icon}" }
+            span { class: "font-medium", "{label}" }
         }
     }
 }

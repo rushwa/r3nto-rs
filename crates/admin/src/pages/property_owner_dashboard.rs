@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use crate::components::sidebar::{PageHeader, StatCard, EmptyState};
 use crate::context::admin_auth::use_admin_auth;
+use crate::AdminRoute;
 
 #[component]
 pub fn PropertyOwnerDashboard() -> Element {
@@ -14,7 +15,7 @@ pub fn PropertyOwnerDashboard() -> Element {
     let mut show_add_property_modal = use_signal(|| false);
     let mut fetch_trigger = use_signal(|| 0u32);
 
-    // ✅ FIX: Clone token before use_effect
+    // ✅ Clone token before use_effect to avoid move errors
     let token_for_effect = token.clone();
 
     use_effect(move || {
@@ -22,6 +23,7 @@ pub fn PropertyOwnerDashboard() -> Element {
         let t = token_for_effect.clone();
         loading.set(true);
         spawn(async move {
+            // 1. Check registration fee status
             let status_res = reqwest::Client::new()
                 .get("http://localhost:8000/admin/registration-fee/status")
                 .header("Authorization", format!("Bearer {}", t))
@@ -32,6 +34,7 @@ pub fn PropertyOwnerDashboard() -> Element {
                     reg_fee_status.set(Some(json));
                 }
             }
+
             let has_paid = {
                 let status = reg_fee_status.read();
                 status.as_ref()
@@ -39,15 +42,33 @@ pub fn PropertyOwnerDashboard() -> Element {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
             };
+
             if has_paid {
+                // 2. Fetch properties WITH subscription overview (single endpoint)
                 let props_res = reqwest::Client::new()
-                    .get("http://localhost:8000/admin/properties")
+                    .get("http://localhost:8000/admin/subscriptions/overview")
                     .header("Authorization", format!("Bearer {}", t))
                     .send()
                     .await;
-                if let Ok(resp) = props_res {
-                    if let Ok(json) = resp.json::<Vec<serde_json::Value>>().await {
-                        properties.set(json);
+
+                match props_res {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<Vec<serde_json::Value>>().await {
+                            properties.set(json);
+                        }
+                    }
+                    _ => {
+                        // Fallback: fetch plain properties
+                        let fallback_res = reqwest::Client::new()
+                            .get("http://localhost:8000/admin/properties")
+                            .header("Authorization", format!("Bearer {}", t))
+                            .send()
+                            .await;
+                        if let Ok(resp) = fallback_res {
+                            if let Ok(json) = resp.json::<Vec<serde_json::Value>>().await {
+                                properties.set(json);
+                            }
+                        }
                     }
                 }
             }
@@ -78,6 +99,21 @@ pub fn PropertyOwnerDashboard() -> Element {
             .to_string()
     };
 
+    // Compute stats from properties
+    let total_props = properties.read().len();
+    let active_subs = properties.read().iter()
+        .filter(|p| p.get("sub_status").and_then(|s| s.as_str()) == Some("active"))
+        .count();
+    let expiring_subs = properties.read().iter()
+        .filter(|p| p.get("sub_status").and_then(|s| s.as_str()) == Some("expiring"))
+        .count();
+    let unsubscribed = properties.read().iter()
+        .filter(|p| {
+            let s = p.get("sub_status").and_then(|v| v.as_str()).unwrap_or("none");
+            s == "none" || s == "expired"
+        })
+        .count();
+
     if *loading.read() {
         return rsx! {
             div { class: "flex items-center justify-center h-96",
@@ -90,9 +126,10 @@ pub fn PropertyOwnerDashboard() -> Element {
         div { class: "space-y-6",
             PageHeader {
                 title: "Property Owner Dashboard".to_string(),
-                subtitle: "Manage your properties and subscription".to_string(),
+                subtitle: "Manage your properties and subscriptions".to_string(),
             }
 
+            // Registration Fee Banner
             if !has_paid {
                 div { class: "bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-6",
                     div { class: "flex items-start gap-4",
@@ -110,35 +147,41 @@ pub fn PropertyOwnerDashboard() -> Element {
                 }
             }
 
+            // Stats Cards
             if has_paid {
-                div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
+                div { class: "grid grid-cols-1 md:grid-cols-4 gap-4",
                     StatCard {
                         title: "Total Properties".to_string(),
-                        value: properties.read().len().to_string(),
+                        value: total_props.to_string(),
                         icon: "🏠".to_string(),
-                        change: "Active".to_string(),
+                        change: "Owned".to_string(),
                         change_positive: true,
                     }
                     StatCard {
-                        title: "Available Listings".to_string(),
-                        value: properties.read().iter()
-                            .filter(|p| p.get("status").and_then(|s| s.as_str()) == Some("available"))
-                            .count()
-                            .to_string(),
+                        title: "Active Subscriptions".to_string(),
+                        value: active_subs.to_string(),
                         icon: "✅".to_string(),
                         change: "Live".to_string(),
                         change_positive: true,
                     }
                     StatCard {
-                        title: "Registration".to_string(),
-                        value: "Verified".to_string(),
-                        icon: "💳".to_string(),
-                        change: "Paid".to_string(),
-                        change_positive: true,
+                        title: "Expiring Soon".to_string(),
+                        value: expiring_subs.to_string(),
+                        icon: "⚠️".to_string(),
+                        change: "Within 7 days".to_string(),
+                        change_positive: false,
+                    }
+                    StatCard {
+                        title: "Not Subscribed".to_string(),
+                        value: unsubscribed.to_string(),
+                        icon: "📋".to_string(),
+                        change: "Needs plan".to_string(),
+                        change_positive: false,
                     }
                 }
             }
 
+            // Properties List
             if has_paid {
                 div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
                     div { class: "flex items-center justify-between mb-6",
@@ -174,7 +217,7 @@ pub fn PropertyOwnerDashboard() -> Element {
                 }
             }
 
-            // ✅ FIX: Clone token for each modal separately
+            // Payment Modal
             if *show_payment_modal.read() {
                 PaymentModal {
                     fee_amount,
@@ -187,6 +230,7 @@ pub fn PropertyOwnerDashboard() -> Element {
                 }
             }
 
+            // Add Property Modal
             if *show_add_property_modal.read() {
                 AddPropertyModal {
                     token: token.clone(),
@@ -201,6 +245,119 @@ pub fn PropertyOwnerDashboard() -> Element {
     }
 }
 
+// ───────────────────────────────────────────
+// Property Card (with subscription status)
+// ✅ FIX: Uses use_navigator() inside, no prop needed
+// ───────────────────────────────────────────
+#[component]
+fn PropertyCard(property: serde_json::Value) -> Element {
+    // ✅ Get navigator INSIDE the component (not as a prop)
+    let nav = use_navigator();
+
+    let title = property.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+    let price = property.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let location = property.get("location").and_then(|v| v.as_str()).unwrap_or("Unknown location");
+    let property_type = property.get("property_type").and_then(|v| v.as_str()).unwrap_or("property");
+    let property_status = property.get("property_status")
+        .or_else(|| property.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Subscription info
+    let sub_status = property.get("sub_status").and_then(|v| v.as_str()).unwrap_or("none");
+    let plan_name = property.get("plan_name").and_then(|v| v.as_str()).unwrap_or("No Plan");
+    let plan_price = property.get("plan_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let days_remaining = property.get("days_remaining").and_then(|v| v.as_i64()).unwrap_or(0);
+    let end_date = property.get("end_date").and_then(|v| v.as_str());
+
+    let status_color = match property_status {
+        "available" => "bg-green-500/10 text-green-400 border-green-500/20",
+        "occupied" => "bg-red-500/10 text-red-400 border-red-500/20",
+        "maintenance" => "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+        _ => "bg-gray-500/10 text-gray-400 border-gray-500/20",
+    };
+
+    // Subscription badge styling
+    let (sub_badge_color, sub_badge_text) = match sub_status {
+        "active" => (
+            "bg-green-500/10 text-green-400 border-green-500/20",
+            format!("✅ Active • {} days left", days_remaining),
+        ),
+        "expiring" => (
+            "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+            format!("⚠️ Expires in {} days", days_remaining),
+        ),
+        "expired" => (
+            "bg-red-500/10 text-red-400 border-red-500/20",
+            "❌ Expired".to_string(),
+        ),
+        _ => (
+            "bg-gray-500/10 text-gray-400 border-gray-500/20",
+            "📋 Not subscribed".to_string(),
+        ),
+    };
+
+    // Action button config based on subscription status
+    let (action_label, action_color) = match sub_status {
+        "active" => ("Manage Plan", "bg-gray-700 hover:bg-gray-600"),
+        "expiring" => ("Renew Now", "bg-yellow-600 hover:bg-yellow-500"),
+        "expired" => ("Resubscribe", "bg-blue-600 hover:bg-blue-500"),
+        _ => ("Subscribe", "bg-blue-600 hover:bg-blue-500"),
+    };
+
+    rsx! {
+        div { class: "bg-gray-900 rounded-lg border border-gray-700 p-4 hover:border-blue-500/50 transition-colors flex flex-col",
+            // Header: Title + Property Status
+            div { class: "flex items-start justify-between mb-3",
+                div { class: "flex-1 min-w-0",
+                    h3 { class: "text-white font-semibold truncate", "{title}" }
+                    p { class: "text-gray-400 text-sm truncate", "{location}" }
+                }
+                span { class: "px-2 py-1 rounded-full text-xs border {status_color} ml-2 flex-shrink-0",
+                    "{property_status}"
+                }
+            }
+
+            // Price
+            div { class: "mb-3",
+                span { class: "text-blue-400 font-bold text-lg", "KES {price as i32}" }
+                span { class: "text-gray-500 text-xs ml-2 capitalize", "{property_type}" }
+            }
+
+            // Subscription Info Box
+            div { class: "bg-gray-800 rounded p-3 mb-3",
+                div { class: "flex items-center justify-between mb-2",
+                    p { class: "text-gray-400 text-xs", "Subscription" }
+                    span { class: "px-2 py-0.5 rounded-full text-xs border {sub_badge_color}",
+                        "{sub_badge_text}"
+                    }
+                }
+                p { class: "text-white font-medium text-sm", "{plan_name}" }
+                if plan_price > 0.0 {
+                    p { class: "text-gray-500 text-xs", "KES {plan_price as i32}/period" }
+                }
+                if let Some(date) = end_date {
+                    if date.len() > 10 {
+                        p { class: "text-gray-500 text-xs mt-1", "Ends: {&date[..10]}" }
+                    }
+                }
+            }
+
+            // Action Button — uses nav from use_navigator() hook
+            button {
+                class: "w-full mt-auto py-2 {action_color} text-white rounded-lg text-sm font-medium transition-colors",
+                onclick: move |_| {
+                    nav.push(AdminRoute::SubscriptionsPage);
+                },
+                "{action_label}"
+            }
+        }
+    }
+}
+
+// ───────────────────────────────────────────
+// Add Property Modal
+// ───────────────────────────────────────────
 #[component]
 fn AddPropertyModal(
     token: String,
@@ -217,7 +374,7 @@ fn AddPropertyModal(
     let mut loading = use_signal(|| false);
     let mut error_message = use_signal(|| Option::<String>::None);
 
-    // ✅ FIX: Clone token before moving into closure
+    // ✅ Clone token before moving into closure
     let token_for_submit = token.clone();
     let handle_submit = move |_| {
         if title.read().is_empty() {
@@ -386,38 +543,9 @@ fn AddPropertyModal(
     }
 }
 
-#[component]
-fn PropertyCard(property: serde_json::Value) -> Element {
-    let title = property.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
-    let price = property.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let status = property.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let location = property.get("location").and_then(|v| v.as_str()).unwrap_or("Unknown location");
-    let property_type = property.get("property_type").and_then(|v| v.as_str()).unwrap_or("property");
-
-    let status_color = match status {
-        "available" => "bg-green-500/10 text-green-400 border-green-500/20",
-        "occupied" => "bg-red-500/10 text-red-400 border-red-500/20",
-        "maintenance" => "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-        _ => "bg-gray-500/10 text-gray-400 border-gray-500/20",
-    };
-
-    rsx! {
-        div { class: "bg-gray-900 rounded-lg border border-gray-700 p-4 hover:border-blue-500/50 transition-colors",
-            div { class: "flex items-start justify-between mb-3",
-                div {
-                    h3 { class: "text-white font-semibold", "{title}" }
-                    p { class: "text-gray-400 text-sm", "{location}" }
-                }
-                span { class: "px-2 py-1 rounded-full text-xs border {status_color}", "{status}" }
-            }
-            div { class: "flex items-center justify-between mt-4 pt-3 border-t border-gray-700",
-                span { class: "text-gray-400 text-sm capitalize", "{property_type}" }
-                span { class: "text-blue-400 font-bold", "KES {price as i32}" }
-            }
-        }
-    }
-}
-
+// ───────────────────────────────────────────
+// Payment Modal (Registration Fee)
+// ───────────────────────────────────────────
 #[component]
 fn PaymentModal(
     fee_amount: f64,
@@ -438,7 +566,7 @@ fn PaymentModal(
             || (digits.starts_with("7") && digits.len() == 9)
     };
 
-    // ✅ FIX: Clone token before moving into closure
+    // ✅ Clone token before moving into closure
     let token_for_payment = token.clone();
     let handle_payment = move |_| {
         let phone = phone_number.read().clone();

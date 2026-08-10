@@ -101,7 +101,6 @@ pub async fn get_pending_payouts(
     let payouts = admin_service::get_pending_payouts(&state.db).await?;
     Ok(Json(payouts))
 }
-
 pub async fn approve_payout(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -110,8 +109,8 @@ pub async fn approve_payout(
     if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
         return Err(ApiError::Unauthorized("Only admins can approve payouts".to_string()));
     }
-    admin_service::approve_payout(&state.db, &req.payout_id).await?;
-    Ok(Json(serde_json::json!({ "message": "Payout approved" })))
+    admin_service::approve_payout(&state.db, &state.email, &req.payout_id).await?;
+    Ok(Json(serde_json::json!({ "message": "Payout approved and agent notified" })))
 }
 
 pub async fn reject_payout(
@@ -122,8 +121,8 @@ pub async fn reject_payout(
     if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
         return Err(ApiError::Unauthorized("Only admins can reject payouts".to_string()));
     }
-    admin_service::reject_payout(&state.db, &req.payout_id).await?;
-    Ok(Json(serde_json::json!({ "message": "Payout rejected and funds refunded" })))
+    admin_service::reject_payout(&state.db, &state.email, &req.payout_id).await?;
+    Ok(Json(serde_json::json!({ "message": "Payout rejected, funds refunded, and agent notified" })))
 }
 
 #[derive(Deserialize)]
@@ -132,110 +131,44 @@ pub struct SubscribeRequest {
     pub property_id: String,
 }
 
+
+#[derive(Deserialize)]
+pub struct SubscribePropertyRequest {
+    pub plan_id: String,
+    pub property_id: String,
+    pub phone_number: String,
+}
+
 pub async fn subscribe_property(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<SubscribeRequest>,
+    Json(req): Json<SubscribePropertyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
 
-    // Verify user is a PROPERTY_OWNER
-    let user_role: String = sqlx::query_scalar(
-        "SELECT role::text FROM account_users WHERE id = $1"
-    )
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("User not found".into()))?;
+    let result = admin_service::subscribe_property(
+        &state.db,
+        &state.email,
+        &state.mpesa,
+        &user_id,
+        &req.plan_id,
+        &req.property_id,
+        &req.phone_number,
+    ).await?;
 
-    if user_role.to_uppercase() != "PROPERTY_OWNER" {
-        return Err(ApiError::BadRequest("Only property owners can subscribe".into()));
-    }
-
-    let plan_id = Uuid::parse_str(&req.plan_id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid plan ID: {}", e)))?;
-    let property_id = Uuid::parse_str(&req.property_id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
-
-    // Verify property belongs to this user
-    let owner_check: Option<Uuid> = sqlx::query_scalar(
-        "SELECT owner_id FROM properties WHERE id = $1"
-    )
-        .bind(property_id)
-        .fetch_optional(&state.db.pool)
-        .await?;
-
-    match owner_check {
-        Some(id) if id == user_id => {},
-        Some(_) => return Err(ApiError::BadRequest("Property does not belong to you".into())),
-        None => return Err(ApiError::NotFound("Property not found".into())),
-    }
-
-    // Get plan details
-    let plan: Option<(String, f64, String)> = sqlx::query_as(
-        "SELECT name, price::float8, duration::text FROM subscription_plans WHERE id = $1 AND is_active = true"
-    )
-        .bind(plan_id)
-        .fetch_optional(&state.db.pool)
-        .await?;
-
-    let (plan_name, price, duration) = match plan {
-        Some(p) => p,
-        None => return Err(ApiError::NotFound("Plan not found or inactive".into())),
-    };
-
-    // Calculate end date based on duration
-    let now = chrono::Utc::now();
-    let end_date = match duration.as_str() {
-        "monthly" => now + chrono::Duration::days(30),
-        "quarterly" => now + chrono::Duration::days(90),
-        "yearly" => now + chrono::Duration::days(365),
-        "permanent" => now + chrono::Duration::days(36500),
-        _ => now + chrono::Duration::days(30),
-    };
-
-    // Create subscription
-    let subscription_id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO property_subscriptions
-            (id, property_id, plan_id, status, amount_paid, payment_status, start_date, end_date)
-        VALUES ($1, $2, $3, 'active', $4, 'completed', $5, $6)
-        "#
-    )
-        .bind(subscription_id)
-        .bind(property_id)
-        .bind(plan_id)
-        .bind(price)
-        .bind(now)
-        .bind(end_date)
-        .execute(&state.db.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to create subscription: {}", e)))?;
-
-    // Update property subscription status
-    sqlx::query(
-        "UPDATE properties SET subscription_status = 'active', subscription_tier = $1, subscription_start_date = $2, subscription_end_date = $3 WHERE id = $4"
-    )
-        .bind(&duration)
-        .bind(now)
-        .bind(end_date)
-        .bind(property_id)
-        .execute(&state.db.pool)
-        .await?;
-
-    tracing::info!("✅ Property {} subscribed to {} plan", property_id, plan_name);
-
-    Ok(Json(serde_json::json!({
-        "message": format!("Successfully subscribed to {} plan", plan_name),
-        "subscription_id": subscription_id.to_string(),
-        "plan_name": plan_name,
-        "amount_paid": price,
-        "end_date": end_date.to_string()
-    })))
+    Ok(Json(result))
 }
+pub async fn get_subscriptions_overview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
 
+    let overview = admin_service::get_subscriptions_overview(&state.db, &user_id).await?;
+    Ok(Json(overview))
+}
 pub async fn get_my_subscriptions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,

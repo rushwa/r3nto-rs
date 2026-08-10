@@ -652,22 +652,6 @@ pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResu
     })
 }
 
-pub async fn get_subscription_plans(db: &rento_core::Database) -> ApiResult<Vec<SubscriptionPlan>> {
-    let rows: Vec<SubscriptionPlanDbRow> = sqlx::query_as(
-        r#"
-        SELECT
-            id, name, price::float8,
-            COALESCE(features, '{}')::text[] as features,
-            0 as subscribers
-        FROM subscription_plans
-        ORDER BY price
-        "#
-    )
-        .fetch_all(pool(db)).await?;
-
-    Ok(rows.into_iter().map(SubscriptionPlan::from).collect())
-}
-
 pub async fn get_commissions(db: &rento_core::Database) -> ApiResult<Vec<Commission>> {
     let rows: Vec<CommissionDbRow> = sqlx::query_as(
         r#"
@@ -989,23 +973,44 @@ pub async fn get_pending_payouts(db: &rento_core::Database) -> ApiResult<Vec<ser
     Ok(payouts)
 }
 
-pub async fn approve_payout(db: &rento_core::Database, payout_id: &str) -> ApiResult<()> {
+pub async fn approve_payout(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,
+    payout_id: &str,
+) -> ApiResult<()> {
     let id = Uuid::parse_str(payout_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
 
-    // Check current status
-    let current_status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM payout_requests WHERE id = $1"
+    // Get payout details including agent info
+    let payout_info: Option<(Uuid, Uuid, f64, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT pr.id, pr.agent_id, pr.amount::float8, pr.status, pr.mpesa_phone,
+               COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        WHERE pr.id = $1
+        "#
     )
         .bind(id)
         .fetch_optional(pool(db))
         .await?;
 
-    match current_status {
-        Some(s) if s == "pending" => {},
-        Some(s) => return Err(ApiError::BadRequest(format!("Payout is already {}", s))),
+    let (payout_uuid, agent_id, amount, status, phone, agent_name) = match payout_info {
+        Some(p) => p,
         None => return Err(ApiError::NotFound("Payout not found".into())),
+    };
+
+    if status != "pending" {
+        return Err(ApiError::BadRequest(format!("Payout is already {}", status)));
     }
+
+    // Get agent email
+    let agent_email: String = sqlx::query_scalar(
+        "SELECT email FROM account_users WHERE id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
 
     // Mark as approved and processed
     sqlx::query(
@@ -1015,23 +1020,39 @@ pub async fn approve_payout(db: &rento_core::Database, payout_id: &str) -> ApiRe
         .execute(pool(db))
         .await?;
 
-    tracing::info!("✅ Payout {} approved", payout_id);
+    // ✅ Send email notification
+    if let Err(e) = email_service.send_payout_approved(&agent_email, &agent_name, amount, &phone).await {
+        tracing::warn!("Failed to send payout approval email: {}", e);
+        // Don't fail the whole operation if email fails
+    }
+
+    tracing::info!("✅ Payout {} approved for agent {} (KES {:.2})", payout_id, agent_name, amount);
     Ok(())
 }
 
-pub async fn reject_payout(db: &rento_core::Database, payout_id: &str) -> ApiResult<()> {
+pub async fn reject_payout(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,
+    payout_id: &str,
+) -> ApiResult<()> {
     let id = Uuid::parse_str(payout_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
 
-    // Get payout details to refund the wallet
-    let payout: Option<(Uuid, Uuid, f64, String)> = sqlx::query_as(
-        "SELECT id, agent_id, amount::float8, status FROM payout_requests WHERE id = $1"
+    // Get payout details including agent info
+    let payout_info: Option<(Uuid, Uuid, f64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT pr.id, pr.agent_id, pr.amount::float8, pr.status,
+               COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        WHERE pr.id = $1
+        "#
     )
         .bind(id)
         .fetch_optional(pool(db))
         .await?;
 
-    let (payout_uuid, agent_id, amount, status) = match payout {
+    let (payout_uuid, agent_id, amount, status, agent_name) = match payout_info {
         Some(p) => p,
         None => return Err(ApiError::NotFound("Payout not found".into())),
     };
@@ -1039,6 +1060,14 @@ pub async fn reject_payout(db: &rento_core::Database, payout_id: &str) -> ApiRes
     if status != "pending" {
         return Err(ApiError::BadRequest(format!("Cannot reject payout with status: {}", status)));
     }
+
+    // Get agent email
+    let agent_email: String = sqlx::query_scalar(
+        "SELECT email FROM account_users WHERE id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
 
     let mut tx = pool(db).begin().await?;
 
@@ -1061,6 +1090,351 @@ pub async fn reject_payout(db: &rento_core::Database, payout_id: &str) -> ApiRes
 
     tx.commit().await?;
 
-    tracing::info!("❌ Payout {} rejected, KES {:.2} refunded to agent", payout_id, amount);
+    // ✅ Send email notification
+    if let Err(e) = email_service.send_payout_rejected(&agent_email, &agent_name, amount).await {
+        tracing::warn!("Failed to send payout rejection email: {}", e);
+    }
+
+    tracing::info!("❌ Payout {} rejected, KES {:.2} refunded to agent {}", payout_id, amount, agent_name);
     Ok(())
+}
+
+pub async fn get_subscription_plans(db: &rento_core::Database) -> ApiResult<Vec<SubscriptionPlan>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id::text,
+            name,
+            price::float8,
+            CASE
+                WHEN jsonb_typeof(features) = 'array' THEN
+                    (SELECT array_agg(elem::text) FROM jsonb_array_elements_text(features) elem)
+                ELSE '{}'::text[]
+            END as features,
+            0 as subscribers
+        FROM subscription_plans
+        WHERE is_active = true
+        ORDER BY price
+        "#
+    )
+        .fetch_all(pool(db))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch subscription plans: {}", e);
+            ApiError::Internal(format!("Database error: {}", e))
+        })?;
+
+    let plans: Vec<SubscriptionPlan> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        SubscriptionPlan {
+            id: row.try_get::<String, _>("id").unwrap_or_default(),
+            name: row.try_get::<String, _>("name").unwrap_or_default(),
+            price: row.try_get::<f64, _>("price").unwrap_or(0.0),
+            features: row.try_get::<Vec<String>, _>("features").unwrap_or_default(),
+            subscribers: row.try_get::<i64, _>("subscribers").unwrap_or(0) as u32,
+        }
+    }).collect();
+
+    Ok(plans)
+}
+// ───────────────────────────────────────────
+// Subscriptions Overview (per-property)
+// ───────────────────────────────────────────
+pub async fn get_subscriptions_overview(
+    db: &rento_core::Database,
+    user_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            p.id::text,
+            p.title,
+            p.price::float8,
+            COALESCE(p.county || ', ' || p.location, p.location, p.county, 'Unknown') as location,
+            p.status::text as property_status,
+            p.subscription_status::text as current_sub_status,
+            COALESCE(ps.plan_name, 'No Subscription') as plan_name,
+            COALESCE(ps.plan_tier, 'none') as plan_tier,
+            COALESCE(ps.plan_price::float8, 0.0) as plan_price,
+            ps.start_date,
+            ps.end_date,
+            CASE
+                WHEN ps.end_date IS NULL THEN 'none'
+                WHEN ps.end_date < NOW() THEN 'expired'
+                WHEN ps.end_date < NOW() + INTERVAL '7 days' THEN 'expiring'
+                ELSE 'active'
+            END as sub_status,
+            CASE
+                WHEN ps.end_date IS NULL THEN 0
+                WHEN ps.end_date < NOW() THEN 0
+                ELSE GREATEST(0, (ps.end_date::date - NOW()::date))
+            END as days_remaining
+        FROM properties p
+        LEFT JOIN LATERAL (
+            SELECT
+                sp.name as plan_name,
+                sp.tier::text as plan_tier,
+                sp.price::float8 as plan_price,
+                ps2.start_date,
+                ps2.end_date
+            FROM property_subscriptions ps2
+            JOIN subscription_plans sp ON ps2.plan_id = sp.id
+            WHERE ps2.property_id = p.id
+              AND ps2.status = 'active'
+            ORDER BY ps2.created_at DESC
+            LIMIT 1
+        ) ps ON true
+        WHERE p.owner_id = $1
+        ORDER BY
+            CASE
+                WHEN ps.end_date IS NULL THEN 3
+                WHEN ps.end_date < NOW() THEN 2
+                WHEN ps.end_date < NOW() + INTERVAL '7 days' THEN 1
+                ELSE 0
+            END,
+            p.created_at DESC
+        "#
+    )
+        .bind(user_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let overview: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "title": row.try_get::<String, _>("title").unwrap_or_default(),
+            "price": row.try_get::<f64, _>("price").unwrap_or(0.0),
+            "location": row.try_get::<String, _>("location").unwrap_or_default(),
+            "property_status": row.try_get::<String, _>("property_status").unwrap_or_default(),
+            "plan_name": row.try_get::<String, _>("plan_name").unwrap_or_default(),
+            "plan_tier": row.try_get::<String, _>("plan_tier").unwrap_or_default(),
+            "plan_price": row.try_get::<f64, _>("plan_price").unwrap_or(0.0),
+            "sub_status": row.try_get::<String, _>("sub_status").unwrap_or("none".parse().unwrap()),
+            "days_remaining": row.try_get::<i32, _>("days_remaining").unwrap_or(0),
+            "start_date": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("start_date")
+                .ok().flatten().map(|d| d.to_string()),
+            "end_date": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("end_date")
+                .ok().flatten().map(|d| d.to_string()),
+        })
+    }).collect();
+
+    Ok(overview)
+}
+
+// Add this constant at the top of the file (near the other constants if any)
+pub const SUBSCRIPTION_COMMISSION_RATE: f64 = 10.0; // 10% to the converting agent
+
+// ───────────────────────────────────────────
+// Subscribe a Property to a Plan (with M-Pesa payment + Agent Commission)
+// ───────────────────────────────────────────
+pub async fn subscribe_property(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,
+    mpesa_client: &crate::services::mpesa::MpesaClient,
+    user_id: &Uuid,
+    plan_id: &str,
+    property_id: &str,
+    phone: &str,
+) -> ApiResult<serde_json::Value> {
+    let plan_uuid = Uuid::parse_str(plan_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid plan ID: {}", e)))?;
+    let property_uuid = Uuid::parse_str(property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+
+    // 1. Verify user owns the property
+    let owner_check: Option<Uuid> = sqlx::query_scalar(
+        "SELECT owner_id FROM properties WHERE id = $1"
+    )
+        .bind(property_uuid)
+        .fetch_optional(pool(db))
+        .await?;
+
+    match owner_check {
+        Some(id) if id == *user_id => {},
+        Some(_) => return Err(ApiError::BadRequest("Property does not belong to you".into())),
+        None => return Err(ApiError::NotFound("Property not found".into())),
+    }
+
+    // 2. Get plan details
+    let plan: Option<(String, f64, String)> = sqlx::query_as(
+        "SELECT name, price::float8, duration::text FROM subscription_plans WHERE id = $1 AND is_active = true"
+    )
+        .bind(plan_uuid)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (plan_name, price, duration) = match plan {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Plan not found or inactive".into())),
+    };
+
+    // 3. Simulate M-Pesa payment
+    let account_ref = format!("RENTO-SUB-{}", &property_uuid.to_string()[..8]);
+    let (merchant_request_id, checkout_request_id, receipt_number) =
+        mpesa_client.simulate_payment(pool(db), phone, price as u32, &account_ref).await?;
+
+    // 4. Find the M-Pesa transaction
+    let mpesa_tx_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM mpesa_transactions WHERE checkout_request_id = $1"
+    )
+        .bind(&checkout_request_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // 5. Create payment record
+    let payment_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO payments
+            (payer_id, mpesa_transaction_id, payment_type, reference_id, amount, status, paid_at)
+        VALUES ($1, $2, 'subscription', $3, $4, 'completed', NOW())
+        RETURNING id
+        "#
+    )
+        .bind(user_id)
+        .bind(mpesa_tx_id)
+        .bind(property_uuid)
+        .bind(price)
+        .fetch_one(pool(db))
+        .await?;
+
+    // 6. Calculate end date based on duration
+    let now = chrono::Utc::now();
+    let end_date = match duration.as_str() {
+        "monthly" => now + chrono::Duration::days(30),
+        "quarterly" => now + chrono::Duration::days(90),
+        "yearly" => now + chrono::Duration::days(365),
+        "permanent" => now + chrono::Duration::days(36500),
+        _ => now + chrono::Duration::days(30),
+    };
+
+    // 7. Create subscription record
+    let subscription_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO property_subscriptions
+            (id, property_id, plan_id, status, amount_paid, payment_status, start_date, end_date)
+        VALUES ($1, $2, $3, 'active', $4, 'completed', $5, $6)
+        "#
+    )
+        .bind(subscription_id)
+        .bind(property_uuid)
+        .bind(plan_uuid)
+        .bind(price)
+        .bind(now)
+        .bind(end_date)
+        .execute(pool(db))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create subscription: {}", e)))?;
+
+    // 8. Update property subscription status
+    sqlx::query(
+        "UPDATE properties SET subscription_status = 'active', subscription_tier = $1, subscription_start_date = $2, subscription_end_date = $3 WHERE id = $4"
+    )
+        .bind(&plan_name)
+        .bind(now)
+        .bind(end_date)
+        .bind(property_uuid)
+        .execute(pool(db))
+        .await?;
+
+    // 9. Send subscription confirmation email to property owner
+    let owner_email: String = sqlx::query_scalar(
+        "SELECT email FROM account_users WHERE id = $1"
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    let _ = email_service
+        .send_subscription_confirmation(&owner_email, price, &plan_name, &receipt_number, &end_date.to_string())
+        .await
+        .map_err(|e| tracing::warn!("Failed to send subscription confirmation: {}", e));
+
+    // 10. Find the converting agent and credit 10% commission
+    let agent_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT agent_id FROM agent_conversions WHERE property_owner_id = $1"
+    )
+        .bind(user_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let mut agent_commission_credited = 0.0;
+
+    if let Some(agent_id) = agent_id {
+        let commission_amount = price * (SUBSCRIPTION_COMMISSION_RATE / 100.0);
+
+        // Ensure wallet exists
+        crate::services::wallet::get_or_create_wallet(pool(db), &agent_id).await?;
+
+        let mut tx = pool(db).begin().await?;
+
+        // Create ledger entry
+        let ledger_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO commission_ledger
+                (agent_id, payment_id, property_owner_id, property_id,
+                 commission_type, gross_amount, commission_rate, commission_amount,
+                 status, credited_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'credited', NOW())
+            RETURNING id
+            "#
+        )
+            .bind(agent_id)
+            .bind(payment_id)
+            .bind(user_id)
+            .bind(property_uuid)
+            .bind("subscription_10pct")
+            .bind(price)
+            .bind(SUBSCRIPTION_COMMISSION_RATE)
+            .bind(commission_amount)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        // Credit wallet
+        crate::services::wallet::credit_wallet(
+            &mut tx,
+            &agent_id,
+            commission_amount,
+            &ledger_id.to_string(),
+            &format!("subscription_10pct commission on KES {:.2} subscription", price),
+        )
+            .await?;
+
+        tx.commit().await?;
+        agent_commission_credited = commission_amount;
+
+        // Send commission email to agent
+        let agent_email: String = sqlx::query_scalar(
+            "SELECT email FROM account_users WHERE id = $1"
+        )
+            .bind(agent_id)
+            .fetch_one(pool(db))
+            .await?;
+
+        let _ = email_service
+            .send_commission_notification(&agent_email, commission_amount, price, "subscription_10pct")
+            .await
+            .map_err(|e| tracing::warn!("Failed to send commission email: {}", e));
+
+        tracing::info!(
+            "✅ Subscription commission: KES {:.2} credited to agent {} for subscription KES {:.2}",
+            commission_amount, agent_id, price
+        );
+    }
+
+    tracing::info!(
+        "✅ Property {} subscribed to {} plan by owner {} (KES {:.2})",
+        property_uuid, plan_name, user_id, price
+    );
+
+    Ok(serde_json::json!({
+        "message": format!("Successfully subscribed to {} plan", plan_name),
+        "subscription_id": subscription_id.to_string(),
+        "plan_name": plan_name,
+        "amount_paid": price,
+        "end_date": end_date.to_string(),
+        "receipt_number": receipt_number,
+        "agent_commission": agent_commission_credited,
+    }))
 }

@@ -52,20 +52,23 @@ pub async fn admin_auth_middleware(
         || path.starts_with("/admin/properties")
         || path == "/admin/leads"
         || path == "/admin/commissions"
-        || path.starts_with("/admin/commissions/my")  // Agent wallet + commissions
+        || path.starts_with("/admin/commissions/my")
         || path.starts_with("/admin/agents/handshake/");
 
     // ───────────────────────────────────────────
     // Property Owner allowed routes
+    // ✅ FIX: Added all routes Property Owners need
     // ───────────────────────────────────────────
     let is_property_owner_allowed_route = path == "/admin/me"
-        || path.starts_with("/admin/properties")
-        || path == "/admin/commissions"
-        || path.starts_with("/admin/commissions/my")  // Agent wallet + commissions
-        || path == "/admin/registration-fee/status"   // ✅ NEW: Check payment status
-        || path.starts_with("/api/payments/");        // ✅ NEW: Payment endpoints
+        || path.starts_with("/admin/properties")           // View & create properties
+        || path == "/admin/registration-fee/status"         // Check payment status
+        || path.starts_with("/admin/subscriptions")         // View plans & subscribe
+        || path == "/admin/commissions"                     // View commissions
+        || path.starts_with("/admin/commissions/my");       // Wallet & payment history
 
+    // ───────────────────────────────────────────
     // Authorization Logic
+    // ───────────────────────────────────────────
     if !is_admin_or_superuser
         && !(is_agent && is_agent_allowed_route)
         && !(is_property_owner && is_property_owner_allowed_route)
