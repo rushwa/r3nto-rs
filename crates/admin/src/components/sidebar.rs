@@ -66,6 +66,7 @@ pub fn AdminSidebar() -> Element {
                         SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
                         SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "My Commissions" }
                         SidebarLink { to: crate::AdminRoute::ConversionPage, icon: "🤝", label: "Conversion" }
+                        SidebarLink { to: crate::AdminRoute::AgentPayoutsPage, icon: "💸", label: "My Payouts" }
                     }
 
                     // 3. ADMIN ONLY (Superuser and Admin)

@@ -1438,3 +1438,395 @@ pub async fn subscribe_property(
         "agent_commission": agent_commission_credited,
     }))
 }
+
+// ───────────────────────────────────────────
+// Payment History for Property Owner
+// ───────────────────────────────────────────
+pub async fn get_payment_history(
+    db: &rento_core::Database,
+    user_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            p.id::text,
+            p.payment_type,
+            p.amount::float8,
+            p.status,
+            p.paid_at,
+            p.reference_id::text,
+            p.created_at,
+            mt.mpesa_receipt_number,
+            mt.phone_number,
+            -- For subscription payments, get the property title
+            CASE
+                WHEN p.payment_type = 'subscription' AND p.reference_id IS NOT NULL THEN
+                    (SELECT title FROM properties WHERE id = p.reference_id)
+                ELSE NULL
+            END as property_title,
+            -- For subscription payments, get the plan name
+            CASE
+                WHEN p.payment_type = 'subscription' AND p.reference_id IS NOT NULL THEN
+                    (SELECT sp.name FROM property_subscriptions ps
+                     JOIN subscription_plans sp ON ps.plan_id = sp.id
+                     WHERE ps.property_id = p.reference_id
+                     ORDER BY ps.created_at DESC LIMIT 1)
+                ELSE NULL
+            END as plan_name
+        FROM payments p
+        LEFT JOIN mpesa_transactions mt ON p.mpesa_transaction_id = mt.id
+        WHERE p.payer_id = $1
+        ORDER BY p.paid_at DESC NULLS LAST, p.created_at DESC
+        "#
+    )
+        .bind(user_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let history: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        let payment_type: String = row.try_get("payment_type").unwrap_or_default();
+        let amount: f64 = row.try_get::<f64, _>("amount").unwrap_or(0.0);
+        let status: String = row.try_get("status").unwrap_or_default();
+        let receipt: Option<String> = row.try_get("mpesa_receipt_number").ok().flatten();
+        let phone: Option<String> = row.try_get("phone_number").ok().flatten();
+        let property_title: Option<String> = row.try_get("property_title").ok().flatten();
+        let plan_name: Option<String> = row.try_get("plan_name").ok().flatten();
+        let paid_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("paid_at").ok().flatten();
+        let created_at: chrono::DateTime<chrono::Utc> = row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        // Human-readable description
+        let description = match payment_type.as_str() {
+            "registration_fee" => "Registration Fee".to_string(),
+            "subscription" => {
+                let plan = plan_name.as_deref().unwrap_or("Subscription");
+                let prop = property_title.as_deref().unwrap_or("Property");
+                format!("{} — {}", plan, prop)
+            }
+            "renewal" => "Subscription Renewal".to_string(),
+            _ => payment_type.clone(),
+        };
+
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "payment_type": payment_type,
+            "description": description,
+            "amount": amount,
+            "status": status,
+            "receipt_number": receipt,
+            "phone_number": phone,
+            "property_title": property_title,
+            "plan_name": plan_name,
+            "paid_at": paid_at.map(|d| d.to_string()),
+            "created_at": created_at.to_string(),
+        })
+    }).collect();
+
+    Ok(history)
+}
+
+// ───────────────────────────────────────────
+// Payment Summary (totals for the dashboard)
+// ───────────────────────────────────────────
+pub async fn get_payment_summary(
+    db: &rento_core::Database,
+    user_id: &Uuid,
+) -> ApiResult<serde_json::Value> {
+    let total_paid: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount)::float8, 0) FROM payments WHERE payer_id = $1 AND status = 'completed'"
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    let total_payments: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payments WHERE payer_id = $1 AND status = 'completed'"
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    let has_paid_registration_fee = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM payments WHERE payer_id = $1 AND payment_type = 'registration_fee' AND status = 'completed')"
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    let active_subscriptions: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM property_subscriptions ps
+        JOIN properties p ON ps.property_id = p.id
+        WHERE p.owner_id = $1 AND ps.status = 'active' AND ps.end_date > NOW()
+        "#
+    )
+        .bind(user_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    Ok(serde_json::json!({
+        "total_paid": total_paid,
+        "total_payments": total_payments,
+        "has_paid_registration_fee": has_paid_registration_fee,
+        "active_subscriptions": active_subscriptions,
+    }))
+}
+// ───────────────────────────────────────────
+// Payout Management
+// ───────────────────────────────────────────
+
+pub const MINIMUM_PAYOUT_AMOUNT: f64 = 500.0; // Minimum KES 500 to request payout
+
+/// Agent requests a payout from their wallet
+pub async fn request_payout(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+    amount: f64,
+    mpesa_phone: &str,
+) -> ApiResult<serde_json::Value> {
+    // 1. Validate amount
+    if amount < MINIMUM_PAYOUT_AMOUNT {
+        return Err(ApiError::BadRequest(format!(
+            "Minimum payout amount is KES {:.0}",
+            MINIMUM_PAYOUT_AMOUNT
+        )));
+    }
+
+    // 2. Validate phone number
+    let digits: String = mpesa_phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if !((digits.starts_with("254") && digits.len() == 12)
+        || (digits.starts_with("0") && digits.len() == 10)
+        || (digits.starts_with("7") && digits.len() == 9))
+    {
+        return Err(ApiError::BadRequest("Invalid M-Pesa phone number".into()));
+    }
+
+    // Normalize phone to 254 format
+    let normalized_phone = if digits.starts_with("0") {
+        format!("254{}", &digits[1..])
+    } else if digits.starts_with("7") && digits.len() == 9 {
+        format!("254{}", digits)
+    } else {
+        digits
+    };
+
+    // 3. Check wallet balance
+    let wallet = crate::services::wallet::get_or_create_wallet(pool(db), agent_id).await?;
+    if wallet.balance < amount {
+        return Err(ApiError::BadRequest(format!(
+            "Insufficient balance. Available: KES {:.2}, Requested: KES {:.2}",
+            wallet.balance, amount
+        )));
+    }
+
+    // 4. Check for existing pending payout
+    let existing_pending: Option<String> = sqlx::query_scalar(
+        "SELECT id::text FROM payout_requests WHERE agent_id = $1 AND status = 'pending' LIMIT 1"
+    )
+        .bind(agent_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    if existing_pending.is_some() {
+        return Err(ApiError::BadRequest(
+            "You already have a pending payout request. Please wait for it to be processed.".into()
+        ));
+    }
+
+    // 5. Create payout request
+    let payout_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO payout_requests (agent_id, amount, mpesa_phone, status)
+        VALUES ($1, $2, $3, 'pending')
+        RETURNING id
+        "#
+    )
+        .bind(agent_id)
+        .bind(amount)
+        .bind(&normalized_phone)
+        .fetch_one(pool(db))
+        .await?;
+
+    // 6. Debit wallet (move funds to pending)
+    let mut tx = pool(db).begin().await?;
+    crate::services::wallet::debit_wallet(
+        &mut tx,
+        agent_id,
+        amount,
+        &payout_id.to_string(),
+        &format!("Payout request #{} to {}", &payout_id.to_string()[..8], normalized_phone),
+    )
+        .await?;
+
+    // 7. Update pending balance
+    sqlx::query(
+        "UPDATE agent_wallets SET pending_balance = pending_balance + $1, updated_at = NOW() WHERE agent_id = $2"
+    )
+        .bind(amount)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    tracing::info!(
+        "💸 Payout request created: {} for KES {:.2} by agent {}",
+        payout_id, amount, agent_id
+    );
+
+    Ok(serde_json::json!({
+        "message": format!("Payout request of KES {:.2} submitted successfully", amount),
+        "payout_id": payout_id.to_string(),
+        "amount": amount,
+        "mpesa_phone": normalized_phone,
+        "status": "pending"
+    }))
+}
+
+/// Get agent's payout history
+pub async fn get_agent_payout_history(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            pr.id::text,
+            pr.amount::float8,
+            pr.status,
+            pr.mpesa_phone,
+            pr.created_at,
+            pr.processed_at,
+            pr.admin_notes
+        FROM payout_requests pr
+        WHERE pr.agent_id = $1
+        ORDER BY pr.created_at DESC
+        LIMIT 100
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let history: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "amount": row.try_get::<f64, _>("amount").unwrap_or(0.0),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "mpesa_phone": row.try_get::<String, _>("mpesa_phone").unwrap_or_default(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "processed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")
+                .ok().flatten().map(|d| d.to_string()),
+            "admin_notes": row.try_get::<Option<String>, _>("admin_notes").ok().flatten(),
+        })
+    }).collect();
+
+    Ok(history)
+}
+
+/// Get all payout history (admin view)
+pub async fn get_all_payout_history(
+    db: &rento_core::Database,
+    status_filter: Option<&str>,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let query = if let Some(status) = status_filter {
+        format!(
+            r#"
+            SELECT
+                pr.id::text, pr.amount::float8, pr.status, pr.mpesa_phone,
+                pr.created_at, pr.processed_at, pr.admin_notes,
+                u.id::text as agent_id,
+                COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name,
+                u.email as agent_email
+            FROM payout_requests pr
+            JOIN account_users u ON pr.agent_id = u.id
+            WHERE pr.status = '{}'
+            ORDER BY pr.created_at DESC
+            LIMIT 200
+            "#,
+            status
+        )
+    } else {
+        r#"
+        SELECT
+            pr.id::text, pr.amount::float8, pr.status, pr.mpesa_phone,
+            pr.created_at, pr.processed_at, pr.admin_notes,
+            u.id::text as agent_id,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name,
+            u.email as agent_email
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        ORDER BY pr.created_at DESC
+        LIMIT 200
+        "#.to_string()
+    };
+
+    let rows = sqlx::query(&query)
+        .fetch_all(pool(db))
+        .await?;
+
+    let payouts: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "amount": row.try_get::<f64, _>("amount").unwrap_or(0.0),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "mpesa_phone": row.try_get::<String, _>("mpesa_phone").unwrap_or_default(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "processed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")
+                .ok().flatten().map(|d| d.to_string()),
+            "admin_notes": row.try_get::<Option<String>, _>("admin_notes").ok().flatten(),
+            "agent_id": row.try_get::<String, _>("agent_id").unwrap_or_default(),
+            "agent_name": row.try_get::<String, _>("agent_name").unwrap_or_default(),
+            "agent_email": row.try_get::<String, _>("agent_email").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(payouts)
+}
+
+/// Get payout statistics for admin dashboard
+pub async fn get_payout_stats(db: &rento_core::Database) -> ApiResult<serde_json::Value> {
+    let pending_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payout_requests WHERE status = 'pending'"
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    let pending_amount: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount)::float8, 0) FROM payout_requests WHERE status = 'pending'"
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    let approved_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payout_requests WHERE status = 'approved'"
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    let approved_amount: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount)::float8, 0) FROM payout_requests WHERE status = 'approved'"
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    let rejected_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payout_requests WHERE status = 'rejected'"
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    Ok(serde_json::json!({
+        "pending_count": pending_count,
+        "pending_amount": pending_amount,
+        "approved_count": approved_count,
+        "approved_amount": approved_amount,
+        "rejected_count": rejected_count,
+        "total_processed": approved_count + rejected_count,
+    }))
+}

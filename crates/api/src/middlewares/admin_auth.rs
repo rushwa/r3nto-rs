@@ -53,6 +53,8 @@ pub async fn admin_auth_middleware(
         || path == "/admin/leads"
         || path == "/admin/commissions"
         || path.starts_with("/admin/commissions/my")
+        || path == "/admin/payouts/request"
+        || path == "/admin/payouts/my-history"
         || path.starts_with("/admin/agents/handshake/");
 
     // ───────────────────────────────────────────
@@ -64,8 +66,8 @@ pub async fn admin_auth_middleware(
         || path == "/admin/registration-fee/status"         // Check payment status
         || path.starts_with("/admin/subscriptions")         // View plans & subscribe
         || path == "/admin/commissions"                     // View commissions
-        || path.starts_with("/admin/commissions/my");       // Wallet & payment history
-
+        || path.starts_with("/admin/commissions/my")      // Wallet & payment history
+        || path.starts_with("/admin/payments/");
     // ───────────────────────────────────────────
     // Authorization Logic
     // ───────────────────────────────────────────

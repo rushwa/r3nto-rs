@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, State},
     Extension, Json,
 };
+use axum::extract::Query;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -89,10 +90,6 @@ pub async fn verify_handshake(
 }
 
 
-#[derive(Deserialize)]
-pub struct PayoutActionRequest {
-    pub payout_id: String,
-}
 
 pub async fn get_pending_payouts(
     State(state): State<AppState>,
@@ -100,29 +97,6 @@ pub async fn get_pending_payouts(
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
     let payouts = admin_service::get_pending_payouts(&state.db).await?;
     Ok(Json(payouts))
-}
-pub async fn approve_payout(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(req): Json<PayoutActionRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
-        return Err(ApiError::Unauthorized("Only admins can approve payouts".to_string()));
-    }
-    admin_service::approve_payout(&state.db, &state.email, &req.payout_id).await?;
-    Ok(Json(serde_json::json!({ "message": "Payout approved and agent notified" })))
-}
-
-pub async fn reject_payout(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(req): Json<PayoutActionRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
-        return Err(ApiError::Unauthorized("Only admins can reject payouts".to_string()));
-    }
-    admin_service::reject_payout(&state.db, &state.email, &req.payout_id).await?;
-    Ok(Json(serde_json::json!({ "message": "Payout rejected, funds refunded, and agent notified" })))
 }
 
 #[derive(Deserialize)]
@@ -633,4 +607,268 @@ pub async fn get_property_owners_with_status(
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
     let owners = admin_service::get_property_owners_with_status(&state.db).await?;
     Ok(Json(owners))
+}
+
+// ───────────────────────────────────────────
+// Payment History
+// ───────────────────────────────────────────
+pub async fn get_payment_history(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let history = admin_service::get_payment_history(&state.db, &user_id).await?;
+    Ok(Json(history))
+}
+
+pub async fn get_payment_summary(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let summary = admin_service::get_payment_summary(&state.db, &user_id).await?;
+    Ok(Json(summary))
+}
+// ───────────────────────────────────────────
+// Payout Request DTOs
+// ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RequestPayoutRequest {
+    pub amount: f64,
+    pub mpesa_phone: String,
+}
+
+#[derive(Deserialize)]
+pub struct PayoutActionRequest {
+    pub payout_id: String,
+    pub admin_notes: Option<String>,
+}
+
+// ───────────────────────────────────────────
+// Agent: Request Payout
+// ───────────────────────────────────────────
+pub async fn request_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<RequestPayoutRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "AGENT" {
+        return Err(ApiError::Unauthorized("Only agents can request payouts".to_string()));
+    }
+
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let result = admin_service::request_payout(
+        &state.db,
+        &agent_id,
+        req.amount,
+        &req.mpesa_phone,
+    ).await?;
+
+    Ok(Json(result))
+}
+
+// ───────────────────────────────────────────
+// Agent: Get Payout History
+// ───────────────────────────────────────────
+pub async fn get_my_payout_history(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let history = admin_service::get_agent_payout_history(&state.db, &agent_id).await?;
+    Ok(Json(history))
+}
+
+// ───────────────────────────────────────────
+// Admin: Get All Payout History
+// ───────────────────────────────────────────
+pub async fn get_all_payout_history(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can view payout history".to_string()));
+    }
+
+    let status = params.get("status").map(|s| s.as_str());
+    let history = admin_service::get_all_payout_history(&state.db, status).await?;
+    Ok(Json(history))
+}
+
+// ───────────────────────────────────────────
+// Admin: Get Payout Stats
+// ───────────────────────────────────────────
+pub async fn get_payout_stats(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let stats = admin_service::get_payout_stats(&state.db).await?;
+    Ok(Json(stats))
+}
+
+// ───────────────────────────────────────────
+// Admin: Approve Payout (with email)
+// ───────────────────────────────────────────
+pub async fn approve_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<PayoutActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can approve payouts".to_string()));
+    }
+
+    let id = Uuid::parse_str(&req.payout_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Get payout details
+    let payout_info: Option<(Uuid, Uuid, f64, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT pr.id, pr.agent_id, pr.amount::float8, pr.status, pr.mpesa_phone,
+               COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        WHERE pr.id = $1
+        "#
+    )
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+
+    let (payout_uuid, agent_id, amount, status, phone, agent_name) = match payout_info {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Payout not found".into())),
+    };
+
+    if status != "pending" {
+        return Err(ApiError::BadRequest(format!("Payout is already {}", status)));
+    }
+
+    // Get agent email
+    let agent_email: String = sqlx::query_scalar(
+        "SELECT email FROM account_users WHERE id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+
+    // Update status
+    sqlx::query(
+        "UPDATE payout_requests SET status = 'approved', processed_at = NOW(), admin_notes = $2 WHERE id = $1"
+    )
+        .bind(id)
+        .bind(&req.admin_notes)
+        .execute(&state.db.pool)
+        .await?;
+
+    // Clear pending balance
+    sqlx::query(
+        "UPDATE agent_wallets SET pending_balance = GREATEST(0, pending_balance - $1), updated_at = NOW() WHERE agent_id = $2"
+    )
+        .bind(amount)
+        .bind(agent_id)
+        .execute(&state.db.pool)
+        .await?;
+
+    // Send email notification
+    let _ = state.email.send_payout_approved(&agent_email, &agent_name, amount, &phone).await
+        .map_err(|e| tracing::warn!("Failed to send payout approval email: {}", e));
+
+    tracing::info!("✅ Payout {} approved for agent {} (KES {:.2})", payout_uuid, agent_name, amount);
+    Ok(Json(serde_json::json!({ "message": "Payout approved and agent notified" })))
+}
+
+// ───────────────────────────────────────────
+// Admin: Reject Payout (with email + refund)
+// ───────────────────────────────────────────
+pub async fn reject_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<PayoutActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can reject payouts".to_string()));
+    }
+
+    let id = Uuid::parse_str(&req.payout_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Get payout details
+    let payout_info: Option<(Uuid, Uuid, f64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT pr.id, pr.agent_id, pr.amount::float8, pr.status,
+               COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name
+        FROM payout_requests pr
+        JOIN account_users u ON pr.agent_id = u.id
+        WHERE pr.id = $1
+        "#
+    )
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
+
+    let (payout_uuid, agent_id, amount, status, agent_name) = match payout_info {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Payout not found".into())),
+    };
+
+    if status != "pending" {
+        return Err(ApiError::BadRequest(format!("Cannot reject payout with status: {}", status)));
+    }
+
+    // Get agent email
+    let agent_email: String = sqlx::query_scalar(
+        "SELECT email FROM account_users WHERE id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(&state.db.pool)
+        .await?;
+
+    let mut tx = state.db.pool.begin().await?;
+
+    // Refund wallet (credit back)
+    crate::services::wallet::credit_wallet(
+        &mut tx,
+        &agent_id,
+        amount,
+        &payout_uuid.to_string(),
+        &format!("Payout rejected - funds refunded"),
+    ).await?;
+
+    // Clear pending balance
+    sqlx::query(
+        "UPDATE agent_wallets SET pending_balance = GREATEST(0, pending_balance - $1), updated_at = NOW() WHERE agent_id = $2"
+    )
+        .bind(amount)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Mark as rejected
+    sqlx::query(
+        "UPDATE payout_requests SET status = 'rejected', processed_at = NOW(), admin_notes = $2 WHERE id = $1"
+    )
+        .bind(id)
+        .bind(&req.admin_notes)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    // Send email notification
+    let _ = state.email.send_payout_rejected(&agent_email, &agent_name, amount).await
+        .map_err(|e| tracing::warn!("Failed to send payout rejection email: {}", e));
+
+    tracing::info!("❌ Payout {} rejected, KES {:.2} refunded to agent {}", req.payout_id, amount, agent_name);
+    Ok(Json(serde_json::json!({ "message": "Payout rejected, funds refunded, and agent notified" })))
 }

@@ -17,3 +17,5 @@ pub mod agent_conversion;
 pub(crate) mod property_owner_dashboard;
 pub(crate) mod payouts;
 pub(crate) mod owner_profile;
+pub(crate) mod payment_history;
+pub(crate) mod agent_payouts;

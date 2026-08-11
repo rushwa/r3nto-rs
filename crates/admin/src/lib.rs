@@ -28,6 +28,10 @@ use crate::pages::agent_conversion::ConversionPage;
 use crate::pages::property_owner_dashboard::PropertyOwnerDashboard;
 use crate::pages::payouts::PayoutsPage;
 use crate::pages::owner_profile::OwnerProfilePage;
+use crate::pages::payment_history::PaymentHistoryPage;
+use crate::pages::agent_payouts::AgentPayoutsPage;
+
+
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 pub enum AdminRoute {
@@ -45,12 +49,16 @@ pub enum AdminRoute {
         UserProfilePage { id: String },
         #[route("/agents")]
         AgentsPage,
+        #[route("/agent-payouts")]
+        AgentPayoutsPage,
         #[route("/property-owners")]
         PropertyOwnersPage,
         #[route("/properties")]
         PropertiesPage,
         #[route("/properties/:id")]
         PropertyDetailPage { id: String },
+        #[route("/payment-history")]
+        PaymentHistoryPage,
         #[route("/subscriptions")]
         SubscriptionsPage,
         #[route("/commissions")]
@@ -178,9 +186,9 @@ fn OwnerSidebar() -> Element {
                         label: "Subscriptions",
                     }
                     OwnerSidebarLink {
-                        to: AdminRoute::CommissionsPage,
-                        icon: "💰",
-                        label: "Payment History",
+                        to: AdminRoute::PaymentHistoryPage,
+                        icon: "💳".to_string(),
+                        label: "Payment History".to_string(),
                     }
                     OwnerSidebarLink {
                         to: AdminRoute::OwnerProfilePage,

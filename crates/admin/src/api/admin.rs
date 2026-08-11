@@ -473,25 +473,77 @@ pub async fn get_pending_payouts(token: &str) -> Result<Vec<serde_json::Value>, 
     fetch_json("/admin/payouts", "GET", Some(token), None).await
 }
 
-pub async fn approve_payout(token: &str, payout_id: &str) -> Result<(), String> {
-    let body = serde_json::to_string(&serde_json::json!({ "payout_id": payout_id }))
-        .map_err(|e| e.to_string())?;
-    let _: serde_json::Value = fetch_json("/admin/payouts/approve", "POST", Some(token), Some(body)).await?;
-    Ok(())
-}
-
-pub async fn reject_payout(token: &str, payout_id: &str) -> Result<(), String> {
-    let body = serde_json::to_string(&serde_json::json!({ "payout_id": payout_id }))
-        .map_err(|e| e.to_string())?;
-    let _: serde_json::Value = fetch_json("/admin/payouts/reject", "POST", Some(token), Some(body)).await?;
-    Ok(())
-}
-
 pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
     fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
 }
 
+pub async fn get_payment_history(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/payments/history", "GET", Some(token), None).await
+}
 
+// ───────────────────────────────────────────
+// Payout API Functions
+// ───────────────────────────────────────────
+
+pub async fn request_payout(token: &str, amount: f64, mpesa_phone: &str) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Req {
+        amount: f64,
+        mpesa_phone: String,
+    }
+    let body = serde_json::to_string(&Req {
+        amount,
+        mpesa_phone: mpesa_phone.to_string(),
+    }).map_err(|e| e.to_string())?;
+    fetch_json("/admin/payouts/request", "POST", Some(token), Some(body)).await
+}
+
+pub async fn get_my_payout_history(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/payouts/my-history", "GET", Some(token), None).await
+}
+
+pub async fn get_all_payout_history(token: &str, status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let path = match status {
+        Some(s) => format!("/admin/payouts?status={}", s),
+        None => "/admin/payouts".to_string(),
+    };
+    fetch_json(&path, "GET", Some(token), None).await
+}
+
+pub async fn get_payout_stats(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/payouts/stats", "GET", Some(token), None).await
+}
+
+pub async fn approve_payout(token: &str, payout_id: &str, admin_notes: Option<&str>) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req {
+        payout_id: String,
+        admin_notes: Option<String>,
+    }
+    let body = serde_json::to_string(&Req {
+        payout_id: payout_id.to_string(),
+        admin_notes: admin_notes.map(|s| s.to_string()),
+    }).map_err(|e| e.to_string())?;
+    let _: serde_json::Value = fetch_json("/admin/payouts/approve", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+
+pub async fn reject_payout(token: &str, payout_id: &str, admin_notes: Option<&str>) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req {
+        payout_id: String,
+        admin_notes: Option<String>,
+    }
+    let body = serde_json::to_string(&Req {
+        payout_id: payout_id.to_string(),
+        admin_notes: admin_notes.map(|s| s.to_string()),
+    }).map_err(|e| e.to_string())?;
+    let _: serde_json::Value = fetch_json("/admin/payouts/reject", "POST", Some(token), Some(body)).await?;
+    Ok(())
+}
+pub async fn get_payment_summary(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/payments/summary", "GET", Some(token), None).await
+}
 pub async fn get_my_subscriptions(token: &str) -> Result<Vec<serde_json::Value>, String> {
     fetch_json("/admin/subscriptions/my", "GET", Some(token), None).await
 }
