@@ -30,7 +30,7 @@ use crate::pages::payouts::PayoutsPage;
 use crate::pages::owner_profile::OwnerProfilePage;
 use crate::pages::payment_history::PaymentHistoryPage;
 use crate::pages::agent_payouts::AgentPayoutsPage;
-
+use crate::pages::owner_inquiries::OwnerInquiriesPage;
 
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
@@ -53,6 +53,8 @@ pub enum AdminRoute {
         AgentPayoutsPage,
         #[route("/property-owners")]
         PropertyOwnersPage,
+        #[route("/owner-inquiries")]
+        OwnerInquiriesPage,
         #[route("/properties")]
         PropertiesPage,
         #[route("/properties/:id")]
@@ -131,6 +133,9 @@ fn AdminLayout() -> Element {
 // ───────────────────────────────────────────
 // Property Owner Sidebar
 // ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// Property Owner Sidebar
+// ───────────────────────────────────────────
 #[component]
 fn OwnerSidebar() -> Element {
     let auth = use_admin_auth();
@@ -168,7 +173,7 @@ fn OwnerSidebar() -> Element {
                     }
                 }
 
-                // Navigation
+                // ✅ UPDATED NAVIGATION
                 nav { class: "p-4 space-y-1",
                     OwnerSidebarLink {
                         to: AdminRoute::PropertyOwnerDashboard,
@@ -185,10 +190,16 @@ fn OwnerSidebar() -> Element {
                         icon: "⭐",
                         label: "Subscriptions",
                     }
+                    // ✅ THIS IS THE MISSING LINK FOR PROPERTY OWNERS
+                    OwnerSidebarLink {
+                        to: AdminRoute::OwnerInquiriesPage,
+                        icon: "✉️",
+                        label: "Inquiries",
+                    }
                     OwnerSidebarLink {
                         to: AdminRoute::PaymentHistoryPage,
-                        icon: "💳".to_string(),
-                        label: "Payment History".to_string(),
+                        icon: "💳",
+                        label: "Payment History",
                     }
                     OwnerSidebarLink {
                         to: AdminRoute::OwnerProfilePage,
@@ -210,7 +221,6 @@ fn OwnerSidebar() -> Element {
         }
     }
 }
-
 #[component]
 fn OwnerSidebarLink(to: AdminRoute, icon: String, label: String) -> Element {
     rsx! {

@@ -7,18 +7,15 @@ pub fn AdminSidebar() -> Element {
     let auth_state = auth.read();
     let nav = use_navigator();
 
-    // Get the uppercase role returned by the backend for reliable matching
     let user_role = auth_state.user.as_ref()
         .map(|u| u.role.to_uppercase())
         .unwrap_or_default();
 
-    // Define role-based permissions
     let is_superuser = user_role == "SUPERUSER";
     let is_admin = user_role == "ADMIN" || is_superuser;
     let is_agent = user_role == "AGENT";
     let is_property_owner = user_role == "PROPERTY_OWNER";
 
-    // Determine the label to show in the sidebar header
     let role_label = if is_superuser {
         "Superuser"
     } else if is_admin {
@@ -35,7 +32,6 @@ pub fn AdminSidebar() -> Element {
         .map(|u| u.name.clone())
         .unwrap_or_else(|| "User".to_string());
 
-    // Logout handler: clears token and redirects to login
     let handle_logout = move |_| {
         clear_token();
         let _ = nav.push(crate::AdminRoute::LoginPage);
@@ -43,50 +39,67 @@ pub fn AdminSidebar() -> Element {
 
     rsx! {
         aside { class: "fixed left-0 top-0 h-full w-64 bg-gray-800 border-r border-gray-700 overflow-y-auto flex flex-col z-20",
-
-            // --- TOP SECTION (Header & Nav Links) ---
             div { class: "flex-1",
                 div { class: "p-6 border-b border-gray-700",
                     h2 { class: "text-xl font-bold text-white", "Rento {role_label}" }
                     p { class: "text-sm text-gray-400 mt-1", "{user_name}" }
-
-                    // Debug line: Shows exactly what the backend is sending.
-                    // You can safely delete this block once you confirm roles are working correctly.
                     p { class: "text-[10px] text-gray-500 mt-1 font-mono", "Role: {user_role}" }
                 }
-
                 nav { class: "p-4 space-y-2",
-                    // 1. COMMON LINKS (Everyone with is_staff=true can see these)
-                    SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
-                    SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
-                    SidebarLink { to: crate::AdminRoute::SubscriptionsPage, icon: "⭐", label: "Subscriptions" }
 
-                    // 2. AGENT SPECIFIC (Agents, Admins, and Superusers can manage leads/conversions)
-                    if is_agent || is_admin || is_superuser {
+                    // ═══════════════════════════════════════════
+                    // ✅ PROPERTY OWNER SECTION (MUST COME FIRST!)
+                    // ═══════════════════════════════════════════
+                    if is_property_owner {
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Owner Portal" }
+                        SidebarLink { to: crate::AdminRoute::PropertyOwnerDashboard, icon: "📊", label: "Dashboard" }
+                        SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏘️", label: "My Properties" }
+                        SidebarLink { to: crate::AdminRoute::SubscriptionsPage, icon: "⭐", label: "Subscriptions" }
+                        SidebarLink { to: crate::AdminRoute::OwnerInquiriesPage, icon: "✉️", label: "Inquiries" }
+                        SidebarLink { to: crate::AdminRoute::PaymentHistoryPage, icon: "💳", label: "Payment History" }
+                        SidebarLink { to: crate::AdminRoute::OwnerProfilePage, icon: "👤", label: "My Profile" }
+                    }
+
+                    // ═══════════════════════════════════════════
+                    // ✅ AGENT SECTION (Agents only, not PO/Admin)
+                    // ═══════════════════════════════════════════
+                    if is_agent && !is_property_owner && !is_admin {
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Agent Portal" }
+                        SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
+                        SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
                         SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
                         SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "My Commissions" }
                         SidebarLink { to: crate::AdminRoute::ConversionPage, icon: "🤝", label: "Conversion" }
                         SidebarLink { to: crate::AdminRoute::AgentPayoutsPage, icon: "💸", label: "My Payouts" }
                     }
 
-                    // 3. ADMIN ONLY (Superuser and Admin)
-                    // Agents and Property Owners will NOT see this section
+                    // ═══════════════════════════════════════════
+                    // ✅ ADMIN / SUPERUSER SECTION
+                    // ═══════════════════════════════════════════
                     if is_admin || is_superuser {
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Admin Portal" }
+                        SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
+
                         div { class: "border-t border-gray-700 my-4" }
-                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold", "Management" }
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Management" }
                         SidebarLink { to: crate::AdminRoute::UsersPage, icon: "👤", label: "Users" }
                         SidebarLink { to: crate::AdminRoute::AgentsPage, icon: "🏢", label: "Agents" }
-                        SidebarLink { to: crate::AdminRoute::PayoutsPage, icon: "💸", label: "Agent Payouts" }
                         SidebarLink { to: crate::AdminRoute::PropertyOwnersPage, icon: "🏘️", label: "Property Owners" }
-                        SidebarLink { to: crate::AdminRoute::SubscriptionsPage, icon: "💳", label: "Subscriptions" }
-                        SidebarLink { to: crate::AdminRoute::InquiriesPage, icon: "📨", label: "Inquiries" }
+                        SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
+                        SidebarLink { to: crate::AdminRoute::InquiriesPage, icon: "📨", label: "All Inquiries" }
+
+                        div { class: "border-t border-gray-700 my-4" }
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Financial" }
+                        SidebarLink { to: crate::AdminRoute::PayoutsPage, icon: "💸", label: "Agent Payouts" }
+                        SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "Commissions" }
+
+                        div { class: "border-t border-gray-700 my-4" }
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Analytics" }
                         SidebarLink { to: crate::AdminRoute::AnalyticsPage, icon: "📈", label: "Analytics" }
                         SidebarLink { to: crate::AdminRoute::SettingsPage, icon: "⚙️", label: "Settings" }
                     }
                 }
             }
-
-            // --- BOTTOM SECTION (Log Out) ---
             div { class: "p-4 border-t border-gray-700 mt-auto",
                 button {
                     class: "w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-red-600/20 text-red-400 hover:text-red-300 transition-colors font-medium",

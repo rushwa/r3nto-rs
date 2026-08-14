@@ -51,6 +51,7 @@ pub async fn admin_auth_middleware(
     let is_agent_allowed_route = path == "/admin/me"
         || path.starts_with("/admin/properties")
         || path == "/admin/leads"
+        || path.starts_with("/admin/agent-leads")      // ✅ NEW: Lead pipeline
         || path == "/admin/commissions"
         || path.starts_with("/admin/commissions/my")
         || path == "/admin/payouts/request"
@@ -67,7 +68,9 @@ pub async fn admin_auth_middleware(
         || path.starts_with("/admin/subscriptions")         // View plans & subscribe
         || path == "/admin/commissions"                     // View commissions
         || path.starts_with("/admin/commissions/my")      // Wallet & payment history
-        || path.starts_with("/admin/payments/");
+        || path.starts_with("/admin/payments/")
+        || path == "/admin/owner-inquiries"
+        || path.starts_with("/admin/owner-inquiries/");
     // ───────────────────────────────────────────
     // Authorization Logic
     // ───────────────────────────────────────────

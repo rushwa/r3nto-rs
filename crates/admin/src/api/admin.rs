@@ -473,6 +473,21 @@ pub async fn get_pending_payouts(token: &str) -> Result<Vec<serde_json::Value>, 
     fetch_json("/admin/payouts", "GET", Some(token), None).await
 }
 
+pub async fn get_agent_leads(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/agent-leads", "GET", Some(token), None).await
+}
+
+pub async fn update_lead_stage(token: &str, lead_id: &str, stage: &str) -> Result<(), String> {
+    let payload = serde_json::json!({ "pipeline_stage": stage });
+    let _: serde_json::Value = fetch_json(
+        &format!("/admin/agent-leads/{}/stage", lead_id),
+        "POST",
+        Some(token),
+        Some(payload.to_string()),
+    ).await?;
+    Ok(())
+}
+
 pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
     fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
 }

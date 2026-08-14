@@ -549,56 +549,7 @@ pub async fn get_properties(db: &rento_core::Database, claims: &Claims) -> ApiRe
 
     Ok(rows.into_iter().map(Property::from).collect())
 }
-pub async fn get_agent_leads(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
 
-    let is_agent = claims.role.to_uppercase() == "AGENT";
-
-    let rows = if is_agent {
-        // AGENT: Only see leads they have claimed
-        sqlx::query(
-            r#"
-            SELECT
-                id::text, email, full_name, phone, status::text,
-                claimed_by::text, created_at, updated_at
-            FROM agent_leads
-            WHERE claimed_by = $1
-            ORDER BY created_at DESC
-            "#
-        )
-            .bind(user_id)
-            .fetch_all(pool(db)).await?
-    } else {
-        // ADMIN/SUPERUSER: See all leads
-        sqlx::query(
-            r#"
-            SELECT
-                id::text, email, full_name, phone, status::text,
-                claimed_by::text, created_at, updated_at
-            FROM agent_leads
-            ORDER BY created_at DESC
-            "#
-        )
-            .fetch_all(pool(db)).await?
-    };
-
-    // Map the rows to JSON (matching your get_user_profile pattern)
-    let leads: Vec<serde_json::Value> = rows.into_iter().map(|row| {
-        serde_json::json!({
-            "id": row.try_get::<String, _>("id").unwrap_or_default(),
-            "email": row.try_get::<String, _>("email").unwrap_or_default(),
-            "full_name": row.try_get::<String, _>("full_name").unwrap_or_default(),
-            "phone": row.try_get::<Option<String>, _>("phone").unwrap_or_default(),
-            "status": row.try_get::<String, _>("status").unwrap_or_default(),
-            "claimed_by": row.try_get::<Option<String>, _>("claimed_by").unwrap_or_default(),
-            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").map(|d| d.to_string()).unwrap_or_default(),
-            "updated_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at").map(|d| d.to_string()).unwrap_or_default(),
-        })
-    }).collect();
-
-    Ok(leads)
-}
 pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResult<PropertyDetail> {
     let property_id = Uuid::parse_str(id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
@@ -1829,4 +1780,189 @@ pub async fn get_payout_stats(db: &rento_core::Database) -> ApiResult<serde_json
         "rejected_count": rejected_count,
         "total_processed": approved_count + rejected_count,
     }))
+}
+// ───────────────────────────────────────────
+// Owner Inquiry Management
+// ───────────────────────────────────────────
+
+pub async fn get_owner_inquiries(db: &rento_core::Database, owner_id: &Uuid) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            i.id::text, i.name as inquirer_name, i.email as inquirer_email, i.phone as inquirer_phone,
+            i.message, i.status, i.created_at,
+            p.id::text as property_id, p.title as property_title
+        FROM admin_inquiries i
+        JOIN properties p ON i.property_id = p.id
+        WHERE p.owner_id = $1
+        ORDER BY i.created_at DESC
+        "#
+    )
+        .bind(owner_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let inquiries: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "inquirer_name": row.try_get::<String, _>("inquirer_name").unwrap_or_default(),
+            "inquirer_email": row.try_get::<String, _>("inquirer_email").unwrap_or_default(),
+            "inquirer_phone": row.try_get::<Option<String>, _>("inquirer_phone").ok().flatten(),
+            "message": row.try_get::<String, _>("message").unwrap_or_default(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "property_id": row.try_get::<String, _>("property_id").unwrap_or_default(),
+            "property_title": row.try_get::<String, _>("property_title").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(inquiries)
+}
+
+pub async fn update_owner_inquiry_status(
+    db: &rento_core::Database,
+    owner_id: &Uuid,
+    inquiry_id: &str,
+    new_status: &str,
+) -> ApiResult<()> {
+    let id = Uuid::parse_str(inquiry_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Verify ownership before updating
+    let is_owner: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM admin_inquiries i
+            JOIN properties p ON i.property_id = p.id
+            WHERE i.id = $1 AND p.owner_id = $2
+        )
+        "#
+    )
+        .bind(id)
+        .bind(owner_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    if !is_owner {
+        return Err(ApiError::Unauthorized("You do not own the property associated with this inquiry".into()));
+    }
+
+    sqlx::query("UPDATE admin_inquiries SET status = $1, updated_at = NOW() WHERE id = $2")
+        .bind(new_status)
+        .bind(id)
+        .execute(pool(db))
+        .await?;
+
+    Ok(())
+}
+
+// ───────────────────────────────────────────
+// Agent Lead Pipeline Management
+// ───────────────────────────────────────────
+
+
+pub async fn get_agent_leads(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            al.id::text,
+            al.full_name as client_name,
+            al.email as client_email,
+            al.phone as client_phone,
+            al.status::text as lead_status,
+            COALESCE(al.pipeline_stage, 'new') as pipeline_stage,
+            al.created_at,
+            al.updated_at
+        FROM agent_leads al
+        WHERE al.claimed_by = $1
+        ORDER BY
+            CASE COALESCE(al.pipeline_stage, 'new')
+                WHEN 'new' THEN 1
+                WHEN 'contacted' THEN 2
+                WHEN 'viewing_scheduled' THEN 3
+                WHEN 'negotiation' THEN 4
+                WHEN 'closed' THEN 5
+                WHEN 'lost' THEN 6
+                ELSE 7
+            END,
+            al.created_at DESC
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch agent leads: {}", e);
+            ApiError::Internal(format!("Database error: {}", e))
+        })?;
+
+    let leads: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        let client_name: String = row.try_get::<String, _>("client_name").unwrap_or_default();
+        let client_email: String = row.try_get::<String, _>("client_email").unwrap_or_default();
+        let client_phone: Option<String> = row.try_get::<Option<String>, _>("client_phone").ok().flatten();
+        let lead_status: String = row.try_get::<String, _>("lead_status").unwrap_or_default();
+
+        // Build a descriptive "property_title" from the lead status since there's no property_interest column
+        let property_title = match lead_status.as_str() {
+            "pending" => "General Lead".to_string(),
+            "converted" => "Converted Client".to_string(),
+            "lost" => "Lost Lead".to_string(),
+            other => format!("Lead: {}", other),
+        };
+
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "client_name": client_name,
+            "client_email": client_email,
+            "client_phone": client_phone,
+            "property_interest": null,
+            "property_title": property_title,
+            "notes": null,
+            "lead_status": lead_status,
+            "pipeline_stage": row.try_get::<String, _>("pipeline_stage").unwrap_or_else(|_| "new".to_string()),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(leads)
+}
+
+pub async fn update_lead_stage(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+    lead_id: &str,
+    new_stage: &str,
+) -> ApiResult<()> {
+    let id = Uuid::parse_str(lead_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // ✅ FIX: Use `claimed_by` instead of `agent_id`
+    let is_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM agent_leads WHERE id = $1 AND claimed_by = $2)"
+    )
+        .bind(id)
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    if !is_owner {
+        return Err(ApiError::Unauthorized("You do not own this lead".into()));
+    }
+
+    sqlx::query(
+        "UPDATE agent_leads SET pipeline_stage = $1, updated_at = NOW() WHERE id = $2"
+    )
+        .bind(new_stage)
+        .bind(id)
+        .execute(pool(db))
+        .await?;
+
+    Ok(())
 }

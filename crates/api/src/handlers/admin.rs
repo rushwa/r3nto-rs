@@ -502,14 +502,6 @@ pub async fn create_property(
 // Leads
 // ───────────────────────────────────────────
 
-pub async fn get_agent_leads(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    let leads = admin_service::get_agent_leads(&state.db, &claims).await?;
-    Ok(Json(leads))
-}
-
 // ───────────────────────────────────────────
 // Subscriptions
 // ───────────────────────────────────────────
@@ -871,4 +863,66 @@ pub async fn reject_payout(
 
     tracing::info!("❌ Payout {} rejected, KES {:.2} refunded to agent {}", req.payout_id, amount, agent_name);
     Ok(Json(serde_json::json!({ "message": "Payout rejected, funds refunded, and agent notified" })))
+}
+// ───────────────────────────────────────────
+// Owner Inquiry Handlers
+// ───────────────────────────────────────────
+
+pub async fn get_owner_inquiries(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let inquiries = admin_service::get_owner_inquiries(&state.db, &user_id).await?;
+    Ok(Json(inquiries))
+}
+
+pub async fn update_owner_inquiry_status(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let new_status = req.get("status")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("Missing 'status' field".into()))?;
+
+    admin_service::update_owner_inquiry_status(&state.db, &user_id, &id, new_status).await?;
+    Ok(Json(serde_json::json!({ "message": "Inquiry status updated" })))
+}
+// ───────────────────────────────────────────
+// Agent Lead Handlers
+// ───────────────────────────────────────────
+
+pub async fn get_agent_leads(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let leads = admin_service::get_agent_leads(&state.db, &agent_id).await?;
+    Ok(Json(leads))
+}
+
+pub async fn update_lead_stage(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let new_stage = req.get("pipeline_stage")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("Missing 'pipeline_stage' field".into()))?;
+
+    admin_service::update_lead_stage(&state.db, &agent_id, &id, new_stage).await?;
+    Ok(Json(serde_json::json!({ "message": "Lead stage updated successfully" })))
 }
