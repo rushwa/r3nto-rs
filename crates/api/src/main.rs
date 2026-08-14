@@ -168,6 +168,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/agents/handshake/verify", post(handlers::admin::verify_handshake))
         .route("/admin/agent-leads", get(handlers::admin::get_agent_leads))
         .route("/admin/agent-leads/:id/stage", post(handlers::admin::update_lead_stage))
+        // Agent performance
+        .route("/admin/agents/performance", get(handlers::admin::get_agent_performance))
+        // Agent referrals
+        .route("/admin/agents/referrals", get(handlers::admin::get_agent_referrals))
+        .route("/admin/agents/referrals/record", post(handlers::admin::record_referral))
+        // B2C Payouts
+        .route("/admin/payouts/b2c-history", get(handlers::admin::get_b2c_history))
+        .route("/admin/payouts/:id/b2c", post(handlers::admin::process_b2c_payout))
         .route("/admin/registration-fee/status", get(handlers::admin::get_registration_fee_status))
         .route("/admin/subscriptions/my", get(handlers::admin::get_my_subscriptions))
         .route("/admin/subscriptions/plans", get(handlers::admin::get_subscription_plans))

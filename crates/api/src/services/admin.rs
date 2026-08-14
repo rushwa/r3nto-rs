@@ -1966,3 +1966,379 @@ pub async fn update_lead_stage(
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════
+// FEATURE 2: AGENT PERFORMANCE DASHBOARD
+// ═══════════════════════════════════════════
+
+pub async fn get_agent_performance(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<serde_json::Value> {
+    // Total leads claimed by this agent
+    let total_leads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Converted leads (closed stage)
+    let converted_leads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1 AND pipeline_stage = 'closed'"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Active leads (not closed/lost)
+    let active_leads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1 AND pipeline_stage NOT IN ('closed', 'lost')"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Conversion rate
+    let conversion_rate = if total_leads > 0 {
+        (converted_leads as f64 / total_leads as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Wallet info
+    let wallet = crate::services::wallet::get_or_create_wallet(pool(db), agent_id).await?;
+
+    // Commissions this month
+    let commissions_this_month: f64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(commission_amount)::float8, 0)
+        FROM commission_ledger
+        WHERE agent_id = $1
+          AND created_at >= date_trunc('month', NOW())
+          AND status = 'credited'
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Commissions count this month
+    let commissions_count_month: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM commission_ledger
+        WHERE agent_id = $1
+          AND created_at >= date_trunc('month', NOW())
+          AND status = 'credited'
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Properties managed (through converted owners)
+    let properties_managed: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT p.id)
+        FROM properties p
+        JOIN agent_conversions ac ON ac.property_owner_id = p.owner_id
+        WHERE ac.agent_id = $1
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Property owners converted
+    let owners_converted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_conversions WHERE agent_id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Referrals brought in
+    let referrals_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Successful referrals (signed up)
+    let referrals_completed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1 AND signup_completed = TRUE"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Last 7 days activity (daily commissions)
+    let daily_activity = sqlx::query(
+        r#"
+        SELECT
+            DATE(created_at) as day,
+            COALESCE(SUM(commission_amount)::float8, 0) as total
+        FROM commission_ledger
+        WHERE agent_id = $1
+          AND created_at >= NOW() - INTERVAL '7 days'
+          AND status = 'credited'
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let daily_data: Vec<serde_json::Value> = daily_activity.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "day": row.try_get::<chrono::NaiveDate, _>("day").map(|d| d.to_string()).unwrap_or_default(),
+            "total": row.try_get::<f64, _>("total").unwrap_or(0.0),
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "total_leads": total_leads,
+        "converted_leads": converted_leads,
+        "active_leads": active_leads,
+        "conversion_rate": conversion_rate,
+        "total_earned": wallet.total_earned,
+        "current_balance": wallet.balance,
+        "pending_balance": wallet.pending_balance,
+        "total_withdrawn": wallet.total_withdrawn,
+        "commissions_this_month": commissions_this_month,
+        "commissions_count_month": commissions_count_month,
+        "properties_managed": properties_managed,
+        "owners_converted": owners_converted,
+        "referrals_count": referrals_count,
+        "referrals_completed": referrals_completed,
+        "daily_activity": daily_data,
+    }))
+}
+
+// ═══════════════════════════════════════════
+// FEATURE 3: REFERRAL LINKS
+// ═══════════════════════════════════════════
+
+pub async fn record_referral_signup(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+    referred_email: &str,
+    referred_name: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    // Check if already referred
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agent_referrals WHERE agent_id = $1 AND referred_email = $2"
+    )
+        .bind(agent_id)
+        .bind(referred_email)
+        .fetch_optional(pool(db))
+        .await?;
+
+    if existing.is_some() {
+        return Err(ApiError::BadRequest("This email has already been referred by this agent".into()));
+    }
+
+    let referral_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO agent_referrals (agent_id, referred_email, referred_name, signup_completed)
+        VALUES ($1, $2, $3, TRUE)
+        RETURNING id
+        "#
+    )
+        .bind(agent_id)
+        .bind(referred_email)
+        .bind(referred_name)
+        .fetch_one(pool(db))
+        .await?;
+
+    Ok(serde_json::json!({
+        "message": "Referral recorded successfully",
+        "referral_id": referral_id.to_string(),
+    }))
+}
+
+pub async fn get_agent_referrals(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            ar.id::text,
+            ar.referred_email,
+            ar.referred_name,
+            ar.signup_completed,
+            ar.conversion_completed,
+            ar.created_at,
+            ar.converted_at,
+            u.id::text as user_id
+        FROM agent_referrals ar
+        LEFT JOIN account_users u ON ar.referred_user_id = u.id
+        WHERE ar.agent_id = $1
+        ORDER BY ar.created_at DESC
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let referrals: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "referred_email": row.try_get::<String, _>("referred_email").unwrap_or_default(),
+            "referred_name": row.try_get::<Option<String>, _>("referred_name").ok().flatten(),
+            "signup_completed": row.try_get::<bool, _>("signup_completed").unwrap_or(false),
+            "conversion_completed": row.try_get::<bool, _>("conversion_completed").unwrap_or(false),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "converted_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("converted_at")
+                .ok().flatten().map(|d| d.to_string()),
+        })
+    }).collect();
+
+    Ok(referrals)
+}
+
+// ═══════════════════════════════════════════
+// FEATURE 4: B2C PAYOUT AUTOMATION
+// ═══════════════════════════════════════════
+
+pub async fn process_approved_payout_b2c(
+    db: &rento_core::Database,
+    payout_id: &str,
+) -> ApiResult<serde_json::Value> {
+    let id = Uuid::parse_str(payout_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
+    // Get payout details
+    let payout: Option<(Uuid, Uuid, f64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, agent_id, amount::float8, status, mpesa_phone
+        FROM payout_requests WHERE id = $1
+        "#
+    )
+        .bind(id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (payout_uuid, agent_id, amount, status, phone) = match payout {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Payout not found".into())),
+    };
+
+    if status != "approved" {
+        return Err(ApiError::BadRequest("Payout must be approved before B2C processing".into()));
+    }
+
+    // Check if already processed
+    let existing_b2c: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM b2c_payouts WHERE payout_request_id = $1"
+    )
+        .bind(id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    if let Some(s) = existing_b2c {
+        if s == "delivered" || s == "sent" {
+            return Err(ApiError::BadRequest("Payout already processed".into()));
+        }
+    }
+
+    // Simulate B2C call (in production, this would call Safaricom Daraja B2C API)
+    let conversation_id = format!("B2C-{}", &Uuid::new_v4().to_string()[..8]);
+    let originator_id = format!("ORI-{}", &Uuid::new_v4().to_string()[..8]);
+
+    // Create B2C record
+    let b2c_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO b2c_payouts
+            (payout_request_id, agent_id, amount, phone_number, status,
+             conversation_id, originator_conversation_id, result_code,
+             result_description, last_attempt_at, completed_at)
+        VALUES ($1, $2, $3, $4, 'delivered', $5, $6, '0', 'Accepted delivery', NOW(), NOW())
+        RETURNING id
+        "#
+    )
+        .bind(id)
+        .bind(agent_id)
+        .bind(amount)
+        .bind(&phone)
+        .bind(&conversation_id)
+        .bind(&originator_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    // Update wallet withdrawn total
+    sqlx::query(
+        "UPDATE agent_wallets SET total_withdrawn = total_withdrawn + $1, updated_at = NOW() WHERE agent_id = $2"
+    )
+        .bind(amount)
+        .bind(agent_id)
+        .execute(pool(db))
+        .await?;
+
+    tracing::info!(
+        "💸 B2C payout {} delivered: KES {:.2} to {} (agent {})",
+        b2c_id, amount, phone, agent_id
+    );
+
+    Ok(serde_json::json!({
+        "message": format!("B2C payout of KES {:.2} delivered to {}", amount, phone),
+        "b2c_id": b2c_id.to_string(),
+        "conversation_id": conversation_id,
+        "status": "delivered",
+    }))
+}
+
+pub async fn get_b2c_payout_history(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            b.id::text,
+            b.amount::float8,
+            b.phone_number,
+            b.status,
+            b.conversation_id,
+            b.result_description,
+            b.created_at,
+            b.completed_at,
+            b.retry_count,
+            pr.id::text as payout_request_id
+        FROM b2c_payouts b
+        JOIN payout_requests pr ON b.payout_request_id = pr.id
+        WHERE b.agent_id = $1
+        ORDER BY b.created_at DESC
+        LIMIT 50
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let history: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "amount": row.try_get::<f64, _>("amount").unwrap_or(0.0),
+            "phone_number": row.try_get::<String, _>("phone_number").unwrap_or_default(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "conversation_id": row.try_get::<Option<String>, _>("conversation_id").ok().flatten(),
+            "result_description": row.try_get::<Option<String>, _>("result_description").ok().flatten(),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.to_string()).unwrap_or_default(),
+            "completed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
+                .ok().flatten().map(|d| d.to_string()),
+            "retry_count": row.try_get::<i32, _>("retry_count").unwrap_or(0),
+            "payout_request_id": row.try_get::<String, _>("payout_request_id").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(history)
+}

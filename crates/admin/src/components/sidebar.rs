@@ -66,6 +66,8 @@ pub fn AdminSidebar() -> Element {
                     if is_agent && !is_property_owner && !is_admin {
                         p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Agent Portal" }
                         SidebarLink { to: crate::AdminRoute::DashboardPage, icon: "📊", label: "Dashboard" }
+                        SidebarLink { to: crate::AdminRoute::AgentPerformancePage, icon: "🏆", label: "My Performance" }
+                        SidebarLink { to: crate::AdminRoute::AgentReferralsPage, icon: "🔗", label: "Referrals" }
                         SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
                         SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
                         SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "My Commissions" }

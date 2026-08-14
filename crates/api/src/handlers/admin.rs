@@ -926,3 +926,81 @@ pub async fn update_lead_stage(
     admin_service::update_lead_stage(&state.db, &agent_id, &id, new_stage).await?;
     Ok(Json(serde_json::json!({ "message": "Lead stage updated successfully" })))
 }
+
+// ───────────────────────────────────────────
+// Agent Performance
+// ───────────────────────────────────────────
+pub async fn get_agent_performance(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let performance = admin_service::get_agent_performance(&state.db, &agent_id).await?;
+    Ok(Json(performance))
+}
+
+// ───────────────────────────────────────────
+// Agent Referrals
+// ───────────────────────────────────────────
+pub async fn get_agent_referrals(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let referrals = admin_service::get_agent_referrals(&state.db, &agent_id).await?;
+    Ok(Json(referrals))
+}
+
+#[derive(Deserialize)]
+pub struct RecordReferralRequest {
+    pub referred_email: String,
+    pub referred_name: Option<String>,
+}
+
+pub async fn record_referral(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<RecordReferralRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let result = admin_service::record_referral_signup(
+        &state.db,
+        &agent_id,
+        &req.referred_email,
+        req.referred_name.as_deref(),
+    ).await?;
+    Ok(Json(result))
+}
+
+// ───────────────────────────────────────────
+// B2C Payout Processing
+// ───────────────────────────────────────────
+pub async fn process_b2c_payout(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(payout_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if claims.role.to_uppercase() != "ADMIN" && claims.role.to_uppercase() != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can process B2C payouts".to_string()));
+    }
+
+    let result = admin_service::process_approved_payout_b2c(&state.db, &payout_id).await?;
+    Ok(Json(result))
+}
+
+pub async fn get_b2c_history(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let history = admin_service::get_b2c_payout_history(&state.db, &agent_id).await?;
+    Ok(Json(history))
+}

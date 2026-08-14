@@ -488,6 +488,7 @@ pub async fn update_lead_stage(token: &str, lead_id: &str, stage: &str) -> Resul
     Ok(())
 }
 
+
 pub async fn get_subscription_plans(token: &str) -> Result<Vec<SubscriptionPlan>, String> {
     fetch_json("/admin/subscriptions/plans", "GET", Some(token), None).await
 }
@@ -605,4 +606,27 @@ pub async fn subscribe_property(token: &str, plan_id: &str, property_id: &str) -
         property_id: property_id.to_string(),
     }).map_err(|e| e.to_string())?;
     fetch_json("/admin/subscriptions/subscribe", "POST", Some(token), Some(body)).await
+}
+
+// Agent Performance
+pub async fn get_agent_performance(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/agents/performance", "GET", Some(token), None).await
+}
+
+// Agent Referrals
+pub async fn get_agent_referrals(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/agents/referrals", "GET", Some(token), None).await
+}
+
+pub async fn record_referral(token: &str, email: &str, name: Option<&str>) -> Result<serde_json::Value, String> {
+    let payload = serde_json::json!({
+        "referred_email": email,
+        "referred_name": name,
+    });
+    fetch_json("/admin/agents/referrals/record", "POST", Some(token), Some(payload.to_string())).await
+}
+
+// B2C Payouts
+pub async fn get_b2c_history(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/payouts/b2c-history", "GET", Some(token), None).await
 }

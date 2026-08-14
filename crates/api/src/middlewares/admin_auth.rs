@@ -56,7 +56,11 @@ pub async fn admin_auth_middleware(
         || path.starts_with("/admin/commissions/my")
         || path == "/admin/payouts/request"
         || path == "/admin/payouts/my-history"
-        || path.starts_with("/admin/agents/handshake/");
+        || path == "/admin/payouts/b2c-history"          // ✅ NEW
+        || path.starts_with("/admin/agents/handshake/")
+        || path == "/admin/agents/performance"            // ✅ NEW
+        || path == "/admin/agents/referrals"              // ✅ NEW
+        || path == "/admin/agents/referrals/record";      // ✅ NEW
 
     // ───────────────────────────────────────────
     // Property Owner allowed routes

@@ -31,6 +31,8 @@ use crate::pages::owner_profile::OwnerProfilePage;
 use crate::pages::payment_history::PaymentHistoryPage;
 use crate::pages::agent_payouts::AgentPayoutsPage;
 use crate::pages::owner_inquiries::OwnerInquiriesPage;
+use crate::pages::agent_performance::AgentPerformancePage;
+use crate::pages::agent_referrals::AgentReferralsPage;
 
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
@@ -51,6 +53,11 @@ pub enum AdminRoute {
         AgentsPage,
         #[route("/agent-payouts")]
         AgentPayoutsPage,
+        // In AdminRoute enum:
+        #[route("/performance")]
+        AgentPerformancePage,
+        #[route("/referrals")]
+        AgentReferralsPage,
         #[route("/property-owners")]
         PropertyOwnersPage,
         #[route("/owner-inquiries")]
