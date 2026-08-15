@@ -16,9 +16,13 @@ pub async fn admin_auth_middleware(
     let path = request.uri().path();
 
     // Skip auth for public endpoints
-    if path == "/admin/setup-status" || path == "/admin/login" {
+    if path == "/admin/setup-status"
+        || path == "/admin/login"
+        || path.starts_with("/api/tours/view/")  // ✅ Public viewing (uses token auth)
+    {
         return Ok(next.run(request).await);
     }
+
 
     let auth_header = request
         .headers()
@@ -65,7 +69,10 @@ pub async fn admin_auth_middleware(
         || path == "/admin/agents/bonus-tiers"
         || path == "/admin/agents/bonus-progress"
         || path == "/admin/agents/bonus-claim"
-        || path == "/admin/agents/leaderboard";
+        || path == "/admin/agents/leaderboard"
+        // ✅ NEW: Virtual tour endpoints
+        || path == "/admin/agents/pending-tours"
+        || path == "/api/tours/upload-video";
 
     // ───────────────────────────────────────────
     // Property Owner allowed routes

@@ -1063,3 +1063,114 @@ pub async fn get_leaderboard(
     let leaderboard = admin_service::get_leaderboard(&state.db, current_id, limit).await?;
     Ok(Json(leaderboard))
 }
+
+// ───────────────────────────────────────────
+// Virtual Tour Handlers
+// ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RequestTourRequest {
+    pub property_id: String,
+    pub client_email: String,
+    pub client_name: Option<String>,
+    pub client_phone: Option<String>,
+}
+
+pub async fn request_virtual_tour(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<RequestTourRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let client_id = Uuid::parse_str(&claims.sub).ok();
+    let result = admin_service::request_virtual_tour(
+        &state.db,
+        &req.property_id,
+        &req.client_email,
+        req.client_name.as_deref(),
+        req.client_phone.as_deref(),
+        client_id.as_ref(),
+    ).await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmTourPaymentRequest {
+    pub payment_reference: String,
+}
+
+pub async fn confirm_tour_payment(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    Json(req): Json<ConfirmTourPaymentRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = admin_service::confirm_tour_payment(&state.db, &request_id, &req.payment_reference).await?;
+    Ok(Json(result))
+}
+
+pub async fn upload_tour_video(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<admin_service::UploadTourVideoRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let result = admin_service::upload_tour_video(&state.db, &agent_id, &req).await?;
+    Ok(Json(result))
+}
+
+pub async fn generate_viewing_link(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let client_id = Uuid::parse_str(&claims.sub).ok();
+    let result = admin_service::generate_viewing_link(&state.db, &request_id, client_id.as_ref()).await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct AccessTourRequest {
+    pub device_fingerprint: String,
+}
+
+pub async fn access_tour_video(
+    State(state): State<AppState>,
+    Path(viewing_token): Path<String>,
+    Json(req): Json<AccessTourRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = admin_service::access_tour_video(
+        &state.db,
+        &viewing_token,
+        &req.device_fingerprint,
+        None,
+        None,
+    ).await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct DelistPropertyRequest {
+    pub reason: Option<String>,
+}
+
+pub async fn delist_property(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(property_id): Path<String>,
+    Json(req): Json<DelistPropertyRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let result = admin_service::delist_property(&state.db, &agent_id, &property_id, req.reason.as_deref()).await?;
+    Ok(Json(result))
+}
+
+pub async fn get_agent_pending_tours(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let tours = admin_service::get_agent_pending_tours(&state.db, &agent_id).await?;
+    Ok(Json(tours))
+}

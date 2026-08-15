@@ -4,11 +4,6 @@ name = "rento-web"
 [web.app]
 title = "RentoLink"
 
-[web.resource]
-style = ["/tailwind.css"]
-
 [web.watcher]
-watch_path = ["../../assets"]
-
-[web.resource.dev]
-style = []
+watch_path = ["src"]
+reload_html = true

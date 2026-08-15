@@ -1,5 +1,6 @@
 [application]
-name = "rento-admin"  # or "rento-web"
+name = "rento-admin"
+asset_dir = "../../assets"
 
 [web.app]
 title = "Rento Admin"
@@ -7,10 +8,9 @@ title = "Rento Admin"
 [web.resource]
 style = ["/tailwind.css"]
 
-# ✅ Point to the shared workspace assets folder
 [web.watcher]
-watch_path = ["../../assets"]
+watch_path = ["../../assets", "src"]
+reload_html = true
 
-# ✅ Serve assets from workspace root
 [web.resource.dev]
 style = []

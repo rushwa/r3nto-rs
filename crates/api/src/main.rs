@@ -179,6 +179,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/agents/bonus-claim", post(handlers::admin::claim_bonus))
         // Leaderboard
         .route("/admin/agents/leaderboard", get(handlers::admin::get_leaderboard))
+        // Virtual Tour System
+        .route("/api/tours/request", post(handlers::admin::request_virtual_tour))
+        .route("/api/tours/:id/confirm-payment", post(handlers::admin::confirm_tour_payment))
+        .route("/api/tours/upload-video", post(handlers::admin::upload_tour_video))
+        .route("/api/tours/:id/viewing-link", post(handlers::admin::generate_viewing_link))
+        .route("/api/tours/view/:token", post(handlers::admin::access_tour_video))
+        .route("/admin/properties/:id/delist", post(handlers::admin::delist_property))
+        .route("/admin/agents/pending-tours", get(handlers::admin::get_agent_pending_tours))
         // B2C Payouts
         .route("/admin/payouts/b2c-history", get(handlers::admin::get_b2c_history))
         .route("/admin/payouts/:id/b2c", post(handlers::admin::process_b2c_payout))

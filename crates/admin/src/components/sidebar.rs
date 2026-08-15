@@ -70,6 +70,8 @@ pub fn AdminSidebar() -> Element {
                         SidebarLink { to: crate::AdminRoute::AgentReferralsPage, icon: "🔗", label: "Referrals" }
                         SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
                         SidebarLink { to: crate::AdminRoute::LeadsPage, icon: "👥", label: "Leads" }
+                         // ✅ NEW: Virtual Tour Studio
+                        SidebarLink { to: crate::AdminRoute::AgentTourStudioPage, icon: "🎬", label: "Tour Studio" }
                         SidebarLink { to: crate::AdminRoute::CommissionsPage, icon: "💰", label: "My Commissions" }
                         SidebarLink { to: crate::AdminRoute::ConversionPage, icon: "🤝", label: "Conversion" }
                         SidebarLink { to: crate::AdminRoute::AgentPayoutsPage, icon: "💸", label: "My Payouts" }
