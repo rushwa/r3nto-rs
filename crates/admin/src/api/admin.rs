@@ -630,3 +630,19 @@ pub async fn record_referral(token: &str, email: &str, name: Option<&str>) -> Re
 pub async fn get_b2c_history(token: &str) -> Result<Vec<serde_json::Value>, String> {
     fetch_json("/admin/payouts/b2c-history", "GET", Some(token), None).await
 }
+
+pub async fn get_bonus_tiers(token: &str) -> Result<Vec<serde_json::Value>, String> {
+    fetch_json("/admin/agents/bonus-tiers", "GET", Some(token), None).await
+}
+
+pub async fn get_my_bonus_progress(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/agents/bonus-progress", "GET", Some(token), None).await
+}
+
+pub async fn claim_bonus(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/agents/bonus-claim", "POST", Some(token), Some("{}".to_string())).await
+}
+
+pub async fn get_leaderboard(token: &str) -> Result<serde_json::Value, String> {
+    fetch_json("/admin/agents/leaderboard", "GET", Some(token), None).await
+}

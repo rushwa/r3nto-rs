@@ -173,6 +173,12 @@ async fn main() -> anyhow::Result<()> {
         // Agent referrals
         .route("/admin/agents/referrals", get(handlers::admin::get_agent_referrals))
         .route("/admin/agents/referrals/record", post(handlers::admin::record_referral))
+        // Bonus Tiers
+        .route("/admin/agents/bonus-tiers", get(handlers::admin::get_bonus_tiers))
+        .route("/admin/agents/bonus-progress", get(handlers::admin::get_my_bonus_progress))
+        .route("/admin/agents/bonus-claim", post(handlers::admin::claim_bonus))
+        // Leaderboard
+        .route("/admin/agents/leaderboard", get(handlers::admin::get_leaderboard))
         // B2C Payouts
         .route("/admin/payouts/b2c-history", get(handlers::admin::get_b2c_history))
         .route("/admin/payouts/:id/b2c", post(handlers::admin::process_b2c_payout))

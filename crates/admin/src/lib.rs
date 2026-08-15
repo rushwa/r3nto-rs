@@ -58,6 +58,7 @@ pub enum AdminRoute {
         AgentPerformancePage,
         #[route("/referrals")]
         AgentReferralsPage,
+        
         #[route("/property-owners")]
         PropertyOwnersPage,
         #[route("/owner-inquiries")]

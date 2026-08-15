@@ -1004,3 +1004,62 @@ pub async fn get_b2c_history(
     let history = admin_service::get_b2c_payout_history(&state.db, &agent_id).await?;
     Ok(Json(history))
 }
+
+// ───────────────────────────────────────────
+// Bonus Tiers
+// ───────────────────────────────────────────
+pub async fn get_bonus_tiers(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let tiers = admin_service::get_bonus_tiers(&state.db).await?;
+    Ok(Json(tiers))
+}
+
+pub async fn get_my_bonus_progress(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let progress = admin_service::get_agent_bonus_progress(&state.db, &agent_id).await?;
+    Ok(Json(progress))
+}
+
+pub async fn claim_bonus(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let awarded = admin_service::check_and_award_bonuses(&state.db, &agent_id).await?;
+
+    if awarded.is_empty() {
+        Ok(Json(serde_json::json!({ "message": "No new bonuses to claim", "awarded": [] })))
+    } else {
+        Ok(Json(serde_json::json!({
+            "message": format!("🏆 {} bonus(es) awarded!", awarded.len()),
+            "awarded": awarded,
+        })))
+    }
+}
+
+// ───────────────────────────────────────────
+// Leaderboard
+// ───────────────────────────────────────────
+pub async fn get_leaderboard(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let role = claims.role.to_uppercase();
+    let agent_id = Uuid::parse_str(&claims.sub).ok();
+
+    // Agents see top 20 + their own rank; Admins see top 50
+    let limit = if role == "ADMIN" || role == "SUPERUSER" { 50 } else { 20 };
+    let current_id = if role == "AGENT" { agent_id.as_ref() } else { None };
+
+    let leaderboard = admin_service::get_leaderboard(&state.db, current_id, limit).await?;
+    Ok(Json(leaderboard))
+}

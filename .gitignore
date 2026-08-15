@@ -12,3 +12,9 @@ uploads/
 *.swo
 *~
 .aider*
+
+# Keep this tracked
+!crates/admin/public/tailwind.css
+
+# Ignore the binary (too large for GitHub)
+tools/tailwindcss-*

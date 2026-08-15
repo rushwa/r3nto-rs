@@ -60,7 +60,12 @@ pub async fn admin_auth_middleware(
         || path.starts_with("/admin/agents/handshake/")
         || path == "/admin/agents/performance"            // ✅ NEW
         || path == "/admin/agents/referrals"              // ✅ NEW
-        || path == "/admin/agents/referrals/record";      // ✅ NEW
+        || path == "/admin/agents/referrals/record"      // ✅ NEW
+        // ✅ NEW: Bonus tiers & leaderboard
+        || path == "/admin/agents/bonus-tiers"
+        || path == "/admin/agents/bonus-progress"
+        || path == "/admin/agents/bonus-claim"
+        || path == "/admin/agents/leaderboard";
 
     // ───────────────────────────────────────────
     // Property Owner allowed routes

@@ -2342,3 +2342,336 @@ pub async fn get_b2c_payout_history(
 
     Ok(history)
 }
+
+// ═══════════════════════════════════════════
+// REFERRAL BONUS TIERS
+// ═══════════════════════════════════════════
+
+pub async fn get_bonus_tiers(db: &rento_core::Database) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        "SELECT id, tier_name, min_referrals, bonus_amount::float8, is_active FROM referral_bonus_tiers WHERE is_active = TRUE ORDER BY min_referrals ASC"
+    )
+        .fetch_all(pool(db))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch bonus tiers: {}", e);
+            ApiError::Internal(format!("Database error: {}", e))
+        })?;
+
+    let tiers: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<i32, _>("id").unwrap_or(0),
+            "tier_name": row.try_get::<String, _>("tier_name").unwrap_or_default(),
+            "min_referrals": row.try_get::<i32, _>("min_referrals").unwrap_or(0),
+            "bonus_amount": row.try_get::<f64, _>("bonus_amount").unwrap_or(0.0),
+            "is_active": row.try_get::<bool, _>("is_active").unwrap_or(true),
+        })
+    }).collect();
+
+    Ok(tiers)
+}
+
+pub async fn get_agent_bonus_progress(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<serde_json::Value> {
+    // Get current referral count
+    let referral_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1 AND signup_completed = TRUE"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await
+        .unwrap_or(0);
+
+    // Get all tiers
+    let tiers = get_bonus_tiers(db).await?;
+
+    // Get claimed bonuses
+    let claimed_rows = sqlx::query(
+        "SELECT tier_id, bonus_amount::float8, claimed_at FROM agent_bonus_claims WHERE agent_id = $1"
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await
+        .unwrap_or_default();
+
+    let claimed_tier_ids: Vec<i32> = claimed_rows.iter()
+        .filter_map(|r| { use sqlx::Row; r.try_get::<i32, _>("tier_id").ok() })
+        .collect();
+
+    let total_bonuses_earned: f64 = claimed_rows.iter()
+        .filter_map(|r| { use sqlx::Row; r.try_get::<f64, _>("bonus_amount").ok() })
+        .sum();
+
+    // Build progress for each tier
+    let tier_progress: Vec<serde_json::Value> = tiers.iter().map(|tier| {
+        let tier_id = tier.get("id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let min_ref = tier.get("min_referrals").and_then(|v| v.as_i64()).unwrap_or(0);
+        let is_claimed = claimed_tier_ids.contains(&tier_id);
+        let progress_pct = if min_ref > 0 {
+            ((referral_count as f64 / min_ref as f64) * 100.0).min(100.0)
+        } else { 100.0 };
+
+        serde_json::json!({
+            "tier": tier,
+            "is_claimed": is_claimed,
+            "progress_percent": progress_pct,
+            "referrals_needed": (min_ref - referral_count).max(0),
+        })
+    }).collect();
+
+    // Find next unclaimed tier
+    let next_tier = tiers.iter().find(|t| {
+        let tid = t.get("id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        !claimed_tier_ids.contains(&tid)
+    }).cloned();
+
+    Ok(serde_json::json!({
+        "current_referrals": referral_count,
+        "total_bonuses_earned": total_bonuses_earned,
+        "tiers_claimed": claimed_tier_ids.len(),
+        "total_tiers": tiers.len(),
+        "tier_progress": tier_progress,
+        "next_tier": next_tier,
+    }))
+}
+
+pub async fn check_and_award_bonuses(
+    db: &rento_core::Database,
+    agent_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    // Get current referral count
+    let referral_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1 AND signup_completed = TRUE"
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await
+        .unwrap_or(0);
+
+    // Get all active tiers
+    let tier_rows = sqlx::query(
+        "SELECT id, tier_name, min_referrals, bonus_amount::float8 FROM referral_bonus_tiers WHERE is_active = TRUE ORDER BY min_referrals ASC"
+    )
+        .fetch_all(pool(db))
+        .await?;
+
+    // Get already claimed tier IDs
+    let claimed_ids: Vec<i32> = sqlx::query_scalar(
+        "SELECT tier_id FROM agent_bonus_claims WHERE agent_id = $1"
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await
+        .unwrap_or_default();
+
+    let mut newly_awarded: Vec<serde_json::Value> = Vec::new();
+
+    for row in &tier_rows {
+        use sqlx::Row;
+        let tier_id: i32 = row.try_get("id").unwrap_or(0);
+        let tier_name: String = row.try_get("tier_name").unwrap_or_default();
+        let min_referrals: i64 = row.try_get("min_referrals").unwrap_or(0);
+        let bonus_amount: f64 = row.try_get("bonus_amount").unwrap_or(0.0);
+
+        // Skip if already claimed or not yet eligible
+        if claimed_ids.contains(&tier_id) || referral_count < min_referrals {
+            continue;
+        }
+
+        // Award the bonus!
+        let mut tx = pool(db).begin().await?;
+
+        // Record the claim
+        sqlx::query(
+            r#"
+            INSERT INTO agent_bonus_claims (agent_id, tier_id, bonus_amount, referral_count_at_claim)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (agent_id, tier_id) DO NOTHING
+            "#
+        )
+            .bind(agent_id)
+            .bind(tier_id)
+            .bind(bonus_amount)
+            .bind(referral_count)
+            .execute(&mut *tx)
+            .await?;
+
+        // Credit wallet
+        crate::services::wallet::credit_wallet(
+            &mut tx,
+            agent_id,
+            bonus_amount,
+            &format!("bonus_tier_{}", tier_id),
+            &format!("🏆 {} Referral Bonus ({} referrals)", tier_name, referral_count),
+        )
+            .await?;
+
+        tx.commit().await?;
+
+        tracing::info!(
+            "🏆 Agent {} awarded {} bonus: KES {:.2} for {} referrals",
+            agent_id, tier_name, bonus_amount, referral_count
+        );
+
+        newly_awarded.push(serde_json::json!({
+            "tier_name": tier_name,
+            "bonus_amount": bonus_amount,
+            "referral_count": referral_count,
+        }));
+    }
+
+    Ok(newly_awarded)
+}
+
+// ═══════════════════════════════════════════
+// AGENT LEADERBOARD
+// ═══════════════════════════════════════════
+
+pub async fn get_leaderboard(
+    db: &rento_core::Database,
+    current_agent_id: Option<&Uuid>,
+    limit: i64,
+) -> ApiResult<serde_json::Value> {
+    // Build leaderboard from live data
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            u.id::text as agent_id,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as agent_name,
+            -- Conversions
+            (SELECT COUNT(*) FROM agent_conversions WHERE agent_id = u.id) as total_conversions,
+            -- Commissions
+            (SELECT COALESCE(SUM(commission_amount)::float8, 0) FROM commission_ledger WHERE agent_id = u.id AND status = 'credited') as total_commissions,
+            -- Referrals
+            (SELECT COUNT(*) FROM agent_referrals WHERE agent_id = u.id AND signup_completed = TRUE) as total_referrals,
+            -- Properties managed
+            (SELECT COUNT(DISTINCT p.id) FROM properties p JOIN agent_conversions ac ON ac.property_owner_id = p.owner_id WHERE ac.agent_id = u.id) as properties_managed,
+            -- Leads closed
+            (SELECT COUNT(*) FROM agent_leads WHERE claimed_by = u.id AND pipeline_stage = 'closed') as leads_closed
+        FROM account_users u
+        WHERE u.role = 'AGENT'
+        ORDER BY
+            (SELECT COALESCE(SUM(commission_amount)::float8, 0) FROM commission_ledger WHERE agent_id = u.id AND status = 'credited') DESC,
+            (SELECT COUNT(*) FROM agent_conversions WHERE agent_id = u.id) DESC
+        LIMIT $1
+        "#
+    )
+        .bind(limit)
+        .fetch_all(pool(db))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to build leaderboard: {}", e);
+            ApiError::Internal(format!("Database error: {}", e))
+        })?;
+
+    let mut agents: Vec<serde_json::Value> = rows.into_iter().enumerate().map(|(idx, row)| {
+        use sqlx::Row;
+        let conversions: i64 = row.try_get("total_conversions").unwrap_or(0);
+        let commissions: f64 = row.try_get("total_commissions").unwrap_or(0.0);
+        let referrals: i64 = row.try_get("total_referrals").unwrap_or(0);
+        let properties: i64 = row.try_get("properties_managed").unwrap_or(0);
+        let leads: i64 = row.try_get("leads_closed").unwrap_or(0);
+
+        // Weighted score: commissions (40%) + conversions (30%) + referrals (20%) + properties (10%)
+        let score = (commissions * 0.4)
+            + (conversions as f64 * 1000.0 * 0.3)
+            + (referrals as f64 * 500.0 * 0.2)
+            + (properties as f64 * 200.0 * 0.1);
+
+        let agent_id_str: String = row.try_get("agent_id").unwrap_or_default();
+        let is_current = current_agent_id
+            .map(|id| id.to_string() == agent_id_str)
+            .unwrap_or(false);
+
+        serde_json::json!({
+            "rank": idx + 1,
+            "agent_id": agent_id_str,
+            "agent_name": row.try_get::<String, _>("agent_name").unwrap_or_default(),
+            "total_conversions": conversions,
+            "total_commissions": commissions,
+            "total_referrals": referrals,
+            "properties_managed": properties,
+            "leads_closed": leads,
+            "score": score,
+            "is_current_user": is_current,
+        })
+    }).collect();
+
+    // Find current agent's rank if they're not in top N
+    let mut my_rank: Option<serde_json::Value> = None;
+    if let Some(current_id) = current_agent_id {
+        if !agents.iter().any(|a| a.get("is_current_user").and_then(|v| v.as_bool()).unwrap_or(false)) {
+            // Agent not in top N, fetch their stats separately
+            let my_stats = sqlx::query(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM agent_conversions WHERE agent_id = $1) as total_conversions,
+                    (SELECT COALESCE(SUM(commission_amount)::float8, 0) FROM commission_ledger WHERE agent_id = $1 AND status = 'credited') as total_commissions,
+                    (SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1 AND signup_completed = TRUE) as total_referrals,
+                    (SELECT COUNT(DISTINCT p.id) FROM properties p JOIN agent_conversions ac ON ac.property_owner_id = p.owner_id WHERE ac.agent_id = $1) as properties_managed
+                "#
+            )
+                .bind(current_id)
+                .fetch_one(pool(db))
+                .await;
+
+            if let Ok(row) = my_stats {
+                use sqlx::Row;
+                let commissions: f64 = row.try_get("total_commissions").unwrap_or(0.0);
+                let conversions: i64 = row.try_get("total_conversions").unwrap_or(0);
+                let referrals: i64 = row.try_get("total_referrals").unwrap_or(0);
+                let properties: i64 = row.try_get("properties_managed").unwrap_or(0);
+                let score = (commissions * 0.4) + (conversions as f64 * 1000.0 * 0.3) + (referrals as f64 * 500.0 * 0.2) + (properties as f64 * 200.0 * 0.1);
+
+                // Count how many agents have a higher score
+                let rank: i64 = sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(*) + 1 FROM account_users u
+                    WHERE u.role = 'AGENT' AND u.id != $1
+                    AND (SELECT COALESCE(SUM(commission_amount)::float8, 0) FROM commission_ledger WHERE agent_id = u.id AND status = 'credited') > $2
+                    "#
+                )
+                    .bind(current_id)
+                    .bind(commissions)
+                    .fetch_one(pool(db))
+                    .await
+                    .unwrap_or(0);
+
+                let my_name: String = sqlx::query_scalar(
+                    "SELECT COALESCE(NULLIF(first_name || ' ' || last_name, ' '), username) FROM account_users WHERE id = $1"
+                )
+                    .bind(current_id)
+                    .fetch_one(pool(db))
+                    .await
+                    .unwrap_or_else(|_| "You".to_string());
+
+                my_rank = Some(serde_json::json!({
+                    "rank": rank,
+                    "agent_name": my_name,
+                    "total_commissions": commissions,
+                    "total_conversions": conversions,
+                    "total_referrals": referrals,
+                    "properties_managed": properties,
+                    "score": score,
+                    "is_current_user": true,
+                }));
+            }
+        }
+    }
+
+    let total_agents: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM account_users WHERE role = 'AGENT'"
+    )
+        .fetch_one(pool(db))
+        .await
+        .unwrap_or(0);
+
+    Ok(serde_json::json!({
+        "leaderboard": agents,
+        "my_rank": my_rank,
+        "total_agents": total_agents,
+    }))
+}

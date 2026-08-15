@@ -22,3 +22,5 @@ pub(crate) mod agent_payouts;
 pub(crate) mod owner_inquiries;
 pub mod agent_performance;
 pub mod agent_referrals;
+pub mod agent_bonuses;
+pub mod leaderboard;
