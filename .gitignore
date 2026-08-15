@@ -17,4 +17,4 @@ uploads/
 !crates/admin/public/tailwind.css
 
 # Ignore the binary (too large for GitHub)
-tools/tailwindcss-*
+tools/tailwindcss-*uploads/

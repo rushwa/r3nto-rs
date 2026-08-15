@@ -15,4 +15,5 @@ pub mod agents;
 pub mod commissions;
 pub mod subscriptions;
 pub mod activate;
+pub mod tour_view;
 

@@ -1,10 +1,16 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State,Multipart,Query},
     Extension, Json,
 };
-use axum::extract::Query;
 use serde::Deserialize;
 use uuid::Uuid;
+use std::path::PathBuf;
+use tokio::fs;
+use axum::body::Body;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+
+
 
 use crate::errors::{ApiError, ApiResult};
 use crate::models::admin::{AdminUser, Claims, CreateUserRequest, LoginRequest, LoginResponse};
@@ -1107,14 +1113,112 @@ pub async fn confirm_tour_payment(
     Ok(Json(result))
 }
 
+
 pub async fn upload_tour_video(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<admin_service::UploadTourVideoRequest>,
+    mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
     let agent_id = Uuid::parse_str(&claims.sub)
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
-    let result = admin_service::upload_tour_video(&state.db, &agent_id, &req).await?;
+
+    // Collect form fields and file
+    let mut tour_request_id: Option<String> = None;
+    let mut duration_seconds: Option<i32> = None;
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut file_mime: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("Multipart error: {}", e);
+        ApiError::BadRequest(format!("Invalid upload: {}", e))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+
+        match name.as_str() {
+            "tour_request_id" => {
+                let text = field.text().await.map_err(|e| {
+                    ApiError::BadRequest(format!("Failed to read tour_request_id: {}", e))
+                })?;
+                tour_request_id = Some(text);
+            }
+            "duration_seconds" => {
+                let text = field.text().await.map_err(|_| {
+                    ApiError::BadRequest("Failed to read duration".into())
+                })?;
+                duration_seconds = text.parse::<i32>().ok();
+            }
+            "video" => {
+                // Read the actual video file
+                let mime = field.content_type().map(|s| s.to_string());
+                let data = field.bytes().await.map_err(|e| {
+                    tracing::error!("Failed to read video bytes: {}", e);
+                    ApiError::BadRequest(format!("Failed to read video: {}", e))
+                })?;
+                file_data = Some(data.to_vec());
+                file_mime = mime;
+            }
+            _ => {
+                // Skip unknown fields
+            }
+        }
+    }
+
+    // Validate required fields
+    let tour_id_str = tour_request_id.ok_or_else(|| {
+        ApiError::BadRequest("Missing tour_request_id".into())
+    })?;
+
+    let video_bytes = file_data.ok_or_else(|| {
+        ApiError::BadRequest("Missing video file".into())
+    })?;
+
+    if video_bytes.is_empty() {
+        return Err(ApiError::BadRequest("Video file is empty".into()));
+    }
+
+    // Generate unique filename
+    let file_id = Uuid::new_v4();
+    let extension = file_mime
+        .as_deref()
+        .and_then(|m| m.split('/').nth(1))
+        .unwrap_or("webm");
+    let filename = format!("{}.{}", file_id, extension);
+    let file_path = PathBuf::from("uploads/tours").join(&filename);
+
+    // Ensure directory exists
+    fs::create_dir_all("uploads/tours").await.map_err(|e| {
+        tracing::error!("Failed to create uploads directory: {}", e);
+        ApiError::Internal("Failed to prepare storage".into())
+    })?;
+
+    // Write file to disk
+    fs::write(&file_path, &video_bytes).await.map_err(|e| {
+        tracing::error!("Failed to write video file: {}", e);
+        ApiError::Internal("Failed to save video".into())
+    })?;
+
+    let file_size = video_bytes.len() as i64;
+    let video_url = format!("/uploads/tours/{}", filename);
+
+    tracing::info!(
+        "🎬 Video saved: {} ({} bytes) for tour {}",
+        video_url, file_size, tour_id_str
+    );
+
+    // Now call the service to update database
+    let upload_req = admin_service::UploadTourVideoRequest {
+        tour_request_id: tour_id_str,
+        video_url,
+        thumbnail_url: None,
+        duration_seconds,
+        file_size_bytes: Some(file_size),
+        device_fingerprint: None,
+        recording_started_at: None,
+        recording_completed_at: None,
+    };
+
+    let result = admin_service::upload_tour_video(&state.db, &agent_id, &upload_req).await?;
+
     Ok(Json(result))
 }
 
@@ -1122,12 +1226,22 @@ pub async fn generate_viewing_link(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     Extension(claims): Extension<Claims>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> Response {
     let client_id = Uuid::parse_str(&claims.sub).ok();
-    let result = admin_service::generate_viewing_link(&state.db, &request_id, client_id.as_ref()).await?;
-    Ok(Json(result))
-}
 
+    match admin_service::generate_viewing_link(&state.db, &request_id, client_id).await {
+        Ok(result) => axum::Json(result).into_response(),
+        Err(e) => {
+            // ✅ Return the ACTUAL error message in the response body
+            let error_detail = format!("{:?}", e);
+            tracing::error!("❌ generate_viewing_link FAILED: {}", error_detail);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("ERROR: {}", error_detail),
+            ).into_response()
+        }
+    }
+}
 #[derive(Deserialize)]
 pub struct AccessTourRequest {
     pub device_fingerprint: String,
@@ -1173,4 +1287,95 @@ pub async fn get_agent_pending_tours(
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
     let tours = admin_service::get_agent_pending_tours(&state.db, &agent_id).await?;
     Ok(Json(tours))
+}
+
+#[derive(Deserialize)]
+pub struct TourHistoryQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn get_agent_tour_history(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<TourHistoryQuery>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let history = admin_service::get_agent_tour_history(
+        &state.db,
+        &agent_id,
+        params.status.as_deref(),
+        params.limit,
+    ).await?;
+    Ok(Json(history))
+}
+
+pub async fn get_agent_sla_stats(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let stats = admin_service::get_agent_sla_stats(&state.db, &agent_id).await?;
+    Ok(Json(stats))
+}
+
+#[derive(Deserialize)]
+pub struct StreamQuery {
+    pub fp: String,  // device fingerprint
+}
+
+pub async fn stream_tour_video(
+    State(state): State<AppState>,
+    Path(viewing_token): Path<String>,
+    Query(params): Query<StreamQuery>,
+) -> Response {
+    // Validate access (checks token, 2-hour expiry, device lock)
+    let file_path = match admin_service::validate_tour_stream_access(
+        &state.db,
+        &viewing_token,
+        &params.fp,
+    ).await {
+        Ok(path) => path,
+        Err(ApiError::NotFound(msg)) => {
+            return (StatusCode::NOT_FOUND, msg).into_response();
+        }
+        Err(ApiError::BadRequest(msg)) => {
+            return (StatusCode::GONE, msg).into_response();  // 410 Gone = expired
+        }
+        Err(ApiError::Unauthorized(msg)) => {
+            return (StatusCode::FORBIDDEN, msg).into_response();  // 403 = wrong device
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response();
+        }
+    };
+
+    // Read the video file
+    let video_bytes = match tokio::fs::read(&file_path).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Failed to read video file {}: {}", file_path, e);
+            return (StatusCode::NOT_FOUND, "Video file not found").into_response();
+        }
+    };
+
+    // Determine content type from extension
+    let content_type = if file_path.ends_with(".mp4") {
+        "video/mp4"
+    } else {
+        "video/webm"
+    };
+
+    // Stream the video with proper headers
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_LENGTH, &*video_bytes.len().to_string()),
+            (header::CACHE_CONTROL, &*"no-store".to_string()),  // Don't cache (security)
+        ],
+        Body::from(video_bytes),
+    ).into_response()
 }

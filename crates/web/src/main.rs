@@ -11,7 +11,7 @@ use components::navbar::Navbar;
 use context::auth::provide_auth_context;
 use pages::{
     dashboard::Dashboard, home::Home, login::Login, profile::Profile,
-    properties::Properties, register::Register,
+    properties::Properties, register::Register,tour_view::TourViewPage,
 };
 
 #[derive(Routable, Clone, PartialEq)]
@@ -35,6 +35,9 @@ pub enum Route {
 
         #[route("/properties")]
         Properties {},
+         // ✅ ADD: Tour viewing route (public, no auth)
+        #[route("/tour/view/:token")]
+        TourViewPage { token: String },
     #[end_layout]
 
     #[route("/:..segments")]

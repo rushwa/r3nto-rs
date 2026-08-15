@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::sync::Arc;
+use axum::extract::DefaultBodyLimit;
 
 mod cli;
 mod errors;
@@ -23,6 +24,7 @@ mod state;
 
 use state::AppState;
 use crate::middlewares::admin_auth::admin_auth_middleware;
+use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,6 +51,10 @@ async fn main() -> anyhow::Result<()> {
         rento_core::email::EmailService::from_env()
             .expect("Failed to initialize EmailService from environment")
     );
+
+    // ✅ Serve uploaded files statically
+    let uploads_service = ServeDir::new("uploads")
+        .append_index_html_on_directories(false);
 
     // Near the top, after creating email_service:
     let mpesa_client = Arc::new(
@@ -100,6 +106,8 @@ async fn main() -> anyhow::Result<()> {
             "http://127.0.0.1:3000".parse()?,
             "http://localhost:3001".parse()?,
             "http://127.0.0.1:3001".parse()?,
+            "http://localhost:8080".parse()?,      // ✅ ADD THIS
+            "http://127.0.0.1:8080".parse()?,      // ✅ ADD THIS
         ])
         .allow_methods([
             axum::http::Method::GET,
@@ -138,7 +146,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/mpesa/callback", post(handlers::mpesa::mpesa_callback))
         .route("/choices/property-types", get(handlers::choices::property_types))
         .route("/choices/status-types", get(handlers::choices::status_types))
-        .route("/choices/purpose-types", get(handlers::choices::purpose_types));
+        .route("/choices/purpose-types", get(handlers::choices::purpose_types))
+        // Public streaming route (no auth — uses token validation)
+        .route("/api/tours/stream/:token", get(handlers::admin::stream_tour_video));
 
     // Protected auth routes
     let protected_routes = Router::new()
@@ -219,6 +229,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/settings", get(handlers::admin::get_settings))
         .route("/admin/settings", post(handlers::admin::update_settings))
         .route("/admin/grant-privileges", post(handlers::admin::grant_admin_privileges))
+        // Add to your admin routes
+        .route("/admin/agents/tour-history", get(handlers::admin::get_agent_tour_history))
+        .route("/admin/agents/sla-stats", get(handlers::admin::get_agent_sla_stats))
+        // ✅ Serve uploaded videos/files
+        .nest_service("/uploads", uploads_service)
+        .layer(DefaultBodyLimit::max(500 * 1024 * 1024))  // ✅ 500MB max upload
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
         .with_state(state.clone());
 

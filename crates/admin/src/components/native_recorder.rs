@@ -33,10 +33,17 @@ extern "C" {
     fn getRecordedMimeType() -> String;
 
     #[wasm_bindgen(js_namespace = ["window", "RentoRecorder"])]
+    async fn uploadVideo(tour_id: &str, auth_token: &str) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = ["window", "RentoRecorder"])]
     fn isSupported() -> bool;
 
     #[wasm_bindgen(js_namespace = ["window", "RentoRecorder"])]
     fn cleanup();
+
+    // ✅ Watermark configuration
+    #[wasm_bindgen(js_namespace = ["window", "RentoRecorder"])]
+    fn setWatermark(config: JsValue);
 }
 
 // ═══════════════════════════════════════════
@@ -58,16 +65,23 @@ pub fn NativeRecorder(
     let mut error = use_signal(|| Option::<String>::None);
     let mut facing_mode = use_signal(|| "environment".to_string());
 
-    // ✅ FIX: Use a signal for video_id so it can be read multiple times
     let video_id = use_signal(|| format!("video-{}", tour_request_id));
+
+    // ✅ CRITICAL: Clone props BEFORE use_effect to avoid move errors
+    let agent_for_watermark = agent_id.clone();
+    let property_for_watermark = property_title.clone();
 
     // ═══════════════════════════════════════════
     // Initialize camera on mount
     // ═══════════════════════════════════════════
     use_effect(move || {
-        let vid = video_id.read().clone();  // ✅ Clone from signal
+        let vid = video_id.read().clone();
         let mut status_sig = status.clone();
         let mut err_sig = error.clone();
+
+        // ✅ Use the pre-cloned values
+        let agent_for_wm = agent_for_watermark.clone();
+        let property_for_wm = property_for_watermark.clone();
 
         spawn(async move {
             gloo_timers::future::sleep(std::time::Duration::from_millis(300)).await;
@@ -75,10 +89,19 @@ pub fn NativeRecorder(
             if !isSupported() {
                 status_sig.set("error".to_string());
                 err_sig.set(Some(
-                    "Your browser doesn't support video recording. Please use Chrome, Firefox, or Edge.".to_string()
+                    "Your browser doesn't support video recording with watermarking. Please use Chrome, Firefox, or Edge.".to_string()
                 ));
                 return;
             }
+
+            // ✅ Configure watermark BEFORE starting camera
+            let watermark_config = serde_json::json!({
+                "agentId": agent_for_wm,
+                "propertyTitle": property_for_wm,
+                "logoText": "R3NTO",
+                "showTimestamp": true,
+            });
+            setWatermark(JsValue::from_str(&watermark_config.to_string()));
 
             let promise = startCamera(&vid, "environment");
             match JsFuture::from(promise).await {
@@ -87,9 +110,7 @@ pub fn NativeRecorder(
                         status_sig.set("ready".to_string());
                     } else {
                         status_sig.set("error".to_string());
-                        err_sig.set(Some(
-                            "Failed to access camera. Please check permissions.".to_string()
-                        ));
+                        err_sig.set(Some("Failed to access camera. Please check permissions.".to_string()));
                     }
                 }
                 Err(e) => {
@@ -204,20 +225,16 @@ pub fn NativeRecorder(
         }
     };
 
-    // Upload video
+    // Upload video (real file upload with progress)
     let upload_handler = {
         let token = auth_token.clone();
         let tour_id = tour_request_id.clone();
         let status_sig = status.clone();
-        let video_sig = video_url.clone();
-        let dur_sig = duration.clone();
         let success_handler = on_success.clone();
         let err_sig = error.clone();
 
         move |_| {
             let mut status_sig = status_sig.clone();
-            let video_sig = video_sig.clone();
-            let dur_sig = dur_sig.clone();
             let success_handler = success_handler.clone();
             let mut err_sig = err_sig.clone();
             let token = token.clone();
@@ -225,44 +242,27 @@ pub fn NativeRecorder(
 
             status_sig.set("uploading".to_string());
 
-            let url = video_sig.read().clone().unwrap_or_default();
-            let size = getRecordedSize();
-            let dur = *dur_sig.read();
-            let mime = getRecordedMimeType();
-
             spawn(async move {
-                let client = reqwest::Client::new();
-                let now_iso = js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default();
-                let payload = serde_json::json!({
-                    "tour_request_id": tour_id,
-                    "video_url": url,
-                    "duration_seconds": dur,
-                    "file_size_bytes": size,
-                    "mime_type": mime,
-                    "recording_started_at": now_iso,
-                    "recording_completed_at": now_iso,
-                });
+                // Call JS upload function
+                let result = uploadVideo(&tour_id, &token).await;
 
-                match client
-                    .post("http://localhost:8000/api/tours/upload-video")
-                    .header("Authorization", format!("Bearer {}", token))
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        success_handler.call("✅ Tour uploaded with watermark!".to_string());
-                    }
-                    Ok(resp) => {
-                        let err_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                        status_sig.set("stopped".to_string());
-                        err_sig.set(Some(format!("Upload failed: {}", err_text)));
-                    }
-                    Err(e) => {
-                        status_sig.set("stopped".to_string());
-                        err_sig.set(Some(format!("Network error: {}", e)));
-                    }
+                // Check if upload succeeded
+                if result.is_undefined() || result.is_null() {
+                    status_sig.set("stopped".to_string());
+                    err_sig.set(Some("Upload failed: No response from server".to_string()));
+                    return;
+                }
+
+                // Try to parse the response
+                let result_str = js_sys::JSON::stringify(&result)
+                    .map(|s| s.as_string().unwrap_or_default())
+                    .unwrap_or_default();
+
+                if result_str.contains("error") || result_str.contains("failed") {
+                    status_sig.set("stopped".to_string());
+                    err_sig.set(Some(format!("Upload failed: {}", result_str)));
+                } else {
+                    success_handler.call("✅ Tour uploaded with watermark!".to_string());
                 }
             });
         }
@@ -274,7 +274,7 @@ pub fn NativeRecorder(
         on_close.call(());
     };
 
-    // ✅ Read video_id as a string for RSX
+    // ✅ Read values for RSX
     let video_id_str = video_id.read().clone();
     let current_status = status.read().clone();
 
@@ -294,14 +294,25 @@ pub fn NativeRecorder(
                     }
                 }
 
-                // Watermark banner
+                // ✅ Watermark banner
                 div { class: "bg-blue-900/20 border border-blue-500/30 rounded-lg p-4 mb-4",
-                    p { class: "text-blue-400 font-semibold text-sm mb-1", "🔒 Automatic Watermarking" }
-                    p { class: "text-gray-300 text-xs",
-                        "Every video is stamped with: R3NTO logo • Agent ID: {agent_id} • Date/Time"
-                    }
-                    p { class: "text-gray-300 text-xs mt-1 font-medium",
-                        "🏠 Property: {property_title}"
+                    div { class: "flex items-start gap-3",
+                        span { class: "text-2xl", "🔒" }
+                        div { class: "flex-1",
+                            p { class: "text-blue-400 font-semibold text-sm mb-1",
+                                "Automatic Watermarking Active"
+                            }
+                            p { class: "text-gray-300 text-xs",
+                                "Every frame is stamped with: "
+                                span { class: "text-yellow-400 font-semibold", "R3NTO" }
+                                " logo • Agent ID: "
+                                span { class: "text-yellow-400 font-mono", "{agent_id.get(..8).unwrap_or(&agent_id)}..." }
+                                " • Live timestamp"
+                            }
+                            p { class: "text-gray-300 text-xs mt-1 font-medium",
+                                "🏠 Property: {property_title}"
+                            }
+                        }
                     }
                 }
 
@@ -381,7 +392,6 @@ pub fn NativeRecorder(
                         }
                     }
                     if current_status == "uploading" {
-                        // ✅ FIXED: Properly nested braces
                         div { class: "text-center w-full",
                             p { class: "text-white mb-2", "Uploading & applying watermark..." }
                             div { class: "w-full bg-gray-700 rounded-full h-2",
@@ -401,7 +411,7 @@ pub fn NativeRecorder(
                 // Security notice
                 div { class: "mt-4 bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-3",
                     p { class: "text-yellow-400 text-xs",
-                        "⚠️ External video uploads are disabled. All tours must be recorded using this native recorder to ensure authenticity."
+                        "⚠️ External video uploads are disabled. All tours must be recorded using this native recorder to ensure authenticity. Watermarks are burned into every video frame."
                     }
                 }
             }

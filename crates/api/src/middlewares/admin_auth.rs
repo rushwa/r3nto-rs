@@ -19,10 +19,11 @@ pub async fn admin_auth_middleware(
     if path == "/admin/setup-status"
         || path == "/admin/login"
         || path.starts_with("/api/tours/view/")  // ✅ Public viewing (uses token auth)
+        || path.starts_with("/api/tours/stream/")   // ✅ ADD: secure streaming (token-gated
+        || path.starts_with("/uploads/")   // ✅ ADD THIS LINE — allow video streaming
     {
         return Ok(next.run(request).await);
     }
-
 
     let auth_header = request
         .headers()
@@ -72,7 +73,10 @@ pub async fn admin_auth_middleware(
         || path == "/admin/agents/leaderboard"
         // ✅ NEW: Virtual tour endpoints
         || path == "/admin/agents/pending-tours"
-        || path == "/api/tours/upload-video";
+        || path == "/api/tours/upload-video"
+        || path == "/admin/agents/tour-history"
+        || path == "/admin/agents/sla-stats"
+        || (path.starts_with("/api/tours/") && path.ends_with("/viewing-link"));
 
     // ───────────────────────────────────────────
     // Property Owner allowed routes
