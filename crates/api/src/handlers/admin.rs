@@ -1070,9 +1070,10 @@ pub async fn get_leaderboard(
     Ok(Json(leaderboard))
 }
 
-// ───────────────────────────────────────────
-// Virtual Tour Handlers
-// ───────────────────────────────────────────
+
+// ═══════════════════════════════════════════
+// Virtual Tour Handlers (UPDATED with email)
+// ═══════════════════════════════════════════
 
 #[derive(Deserialize)]
 pub struct RequestTourRequest {
@@ -1082,6 +1083,7 @@ pub struct RequestTourRequest {
     pub client_phone: Option<String>,
 }
 
+// ✅ UPDATED: Passes email service
 pub async fn request_virtual_tour(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1090,6 +1092,7 @@ pub async fn request_virtual_tour(
     let client_id = Uuid::parse_str(&claims.sub).ok();
     let result = admin_service::request_virtual_tour(
         &state.db,
+        &state.email,  // ✅ PASS EMAIL SERVICE
         &req.property_id,
         &req.client_email,
         req.client_name.as_deref(),
@@ -1104,16 +1107,22 @@ pub struct ConfirmTourPaymentRequest {
     pub payment_reference: String,
 }
 
+// ✅ UPDATED: Passes email service
 pub async fn confirm_tour_payment(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     Json(req): Json<ConfirmTourPaymentRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = admin_service::confirm_tour_payment(&state.db, &request_id, &req.payment_reference).await?;
+    let result = admin_service::confirm_tour_payment(
+        &state.db,
+        &state.email,  // ✅ PASS EMAIL SERVICE
+        &request_id,
+        &req.payment_reference,
+    ).await?;
     Ok(Json(result))
 }
 
-
+// ✅ UPDATED: Passes email service + viewing link base
 pub async fn upload_tour_video(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1133,7 +1142,6 @@ pub async fn upload_tour_video(
         ApiError::BadRequest(format!("Invalid upload: {}", e))
     })? {
         let name = field.name().unwrap_or("").to_string();
-
         match name.as_str() {
             "tour_request_id" => {
                 let text = field.text().await.map_err(|e| {
@@ -1148,7 +1156,6 @@ pub async fn upload_tour_video(
                 duration_seconds = text.parse::<i32>().ok();
             }
             "video" => {
-                // Read the actual video file
                 let mime = field.content_type().map(|s| s.to_string());
                 let data = field.bytes().await.map_err(|e| {
                     tracing::error!("Failed to read video bytes: {}", e);
@@ -1157,13 +1164,10 @@ pub async fn upload_tour_video(
                 file_data = Some(data.to_vec());
                 file_mime = mime;
             }
-            _ => {
-                // Skip unknown fields
-            }
+            _ => {}
         }
     }
 
-    // Validate required fields
     let tour_id_str = tour_request_id.ok_or_else(|| {
         ApiError::BadRequest("Missing tour_request_id".into())
     })?;
@@ -1185,13 +1189,11 @@ pub async fn upload_tour_video(
     let filename = format!("{}.{}", file_id, extension);
     let file_path = PathBuf::from("uploads/tours").join(&filename);
 
-    // Ensure directory exists
     fs::create_dir_all("uploads/tours").await.map_err(|e| {
         tracing::error!("Failed to create uploads directory: {}", e);
         ApiError::Internal("Failed to prepare storage".into())
     })?;
 
-    // Write file to disk
     fs::write(&file_path, &video_bytes).await.map_err(|e| {
         tracing::error!("Failed to write video file: {}", e);
         ApiError::Internal("Failed to save video".into())
@@ -1205,7 +1207,6 @@ pub async fn upload_tour_video(
         video_url, file_size, tour_id_str
     );
 
-    // Now call the service to update database
     let upload_req = admin_service::UploadTourVideoRequest {
         tour_request_id: tour_id_str,
         video_url,
@@ -1217,22 +1218,32 @@ pub async fn upload_tour_video(
         recording_completed_at: None,
     };
 
-    let result = admin_service::upload_tour_video(&state.db, &agent_id, &upload_req).await?;
+    // ✅ GET viewing link base from env
+    let viewing_link_base = std::env::var("CLIENT_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string());
+
+    // ✅ PASS EMAIL SERVICE + VIEWING LINK BASE
+    let result = admin_service::upload_tour_video(
+        &state.db,
+        &state.email,
+        &viewing_link_base,
+        &agent_id,
+        &upload_req,
+    ).await?;
 
     Ok(Json(result))
 }
 
+// Viewing link handler (unchanged - used for manual share button)
 pub async fn generate_viewing_link(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     Extension(claims): Extension<Claims>,
 ) -> Response {
     let client_id = Uuid::parse_str(&claims.sub).ok();
-
     match admin_service::generate_viewing_link(&state.db, &request_id, client_id).await {
         Ok(result) => axum::Json(result).into_response(),
         Err(e) => {
-            // ✅ Return the ACTUAL error message in the response body
             let error_detail = format!("{:?}", e);
             tracing::error!("❌ generate_viewing_link FAILED: {}", error_detail);
             (
@@ -1242,6 +1253,7 @@ pub async fn generate_viewing_link(
         }
     }
 }
+
 #[derive(Deserialize)]
 pub struct AccessTourRequest {
     pub device_fingerprint: String,
@@ -1323,7 +1335,7 @@ pub async fn get_agent_sla_stats(
 
 #[derive(Deserialize)]
 pub struct StreamQuery {
-    pub fp: String,  // device fingerprint
+    pub fp: String,
 }
 
 pub async fn stream_tour_video(
@@ -1331,7 +1343,6 @@ pub async fn stream_tour_video(
     Path(viewing_token): Path<String>,
     Query(params): Query<StreamQuery>,
 ) -> Response {
-    // Validate access (checks token, 2-hour expiry, device lock)
     let file_path = match admin_service::validate_tour_stream_access(
         &state.db,
         &viewing_token,
@@ -1342,17 +1353,16 @@ pub async fn stream_tour_video(
             return (StatusCode::NOT_FOUND, msg).into_response();
         }
         Err(ApiError::BadRequest(msg)) => {
-            return (StatusCode::GONE, msg).into_response();  // 410 Gone = expired
+            return (StatusCode::GONE, msg).into_response();
         }
         Err(ApiError::Unauthorized(msg)) => {
-            return (StatusCode::FORBIDDEN, msg).into_response();  // 403 = wrong device
+            return (StatusCode::FORBIDDEN, msg).into_response();
         }
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response();
         }
     };
 
-    // Read the video file
     let video_bytes = match tokio::fs::read(&file_path).await {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -1361,20 +1371,18 @@ pub async fn stream_tour_video(
         }
     };
 
-    // Determine content type from extension
     let content_type = if file_path.ends_with(".mp4") {
         "video/mp4"
     } else {
         "video/webm"
     };
 
-    // Stream the video with proper headers
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
             (header::CONTENT_LENGTH, &*video_bytes.len().to_string()),
-            (header::CACHE_CONTROL, &*"no-store".to_string()),  // Don't cache (security)
+            (header::CACHE_CONTROL, &*"no-store".to_string()),
         ],
         Body::from(video_bytes),
     ).into_response()

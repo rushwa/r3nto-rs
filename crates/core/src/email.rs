@@ -545,6 +545,236 @@ impl EmailService {
         Ok(())
     }
 
+    // ───────────────────────────────────────────
+    // ✅ TOUR EMAILS
+    // ───────────────────────────────────────────
+
+    /// Email to client: Tour requested, needs payment (KES 20)
+    pub async fn send_tour_requested(
+        &self,
+        to_email: &str,
+        client_name: Option<&str>,
+        property_title: &str,
+        property_location: Option<&str>,
+        fee_amount: f64,
+        tour_request_id: &str,
+        payment_instructions: &str,
+    ) -> Result<(), RentoError> {
+        let recipient = if let Some(name) = client_name {
+            format!("{} <{}>", name, to_email)
+        } else {
+            to_email.to_string()
+        };
+
+        let email = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("🎬 Virtual Tour Requested for {}", property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_requested_template(
+                        client_name.unwrap_or("there"),
+                        property_title,
+                        property_location.unwrap_or(""),
+                        fee_amount,
+                        tour_request_id,
+                        payment_instructions,
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        let transport = self.build_transport()?;
+        transport.send(&email)
+            .map_err(|e| RentoError::Email(format!("Failed to send email: {}", e)))?;
+
+        tracing::info!("📧 Tour requested email sent to {}", to_email);
+        Ok(())
+    }
+
+    /// Email to agent: New tour assigned, 24h SLA
+    pub async fn send_tour_assigned(
+        &self,
+        to_email: &str,
+        agent_name: &str,
+        property_title: &str,
+        property_location: Option<&str>,
+        client_name: &str,
+        sla_deadline: &str,
+    ) -> Result<(), RentoError> {
+        let recipient = format!("{} <{}>", agent_name, to_email);
+
+        let email = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("⏰ New Tour Request - {} (24h SLA)", property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_assigned_template(
+                        agent_name,
+                        property_title,
+                        property_location.unwrap_or(""),
+                        client_name,
+                        sla_deadline,
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        let transport = self.build_transport()?;
+        transport.send(&email)
+            .map_err(|e| RentoError::Email(format!("Failed to send email: {}", e)))?;
+
+        tracing::info!("📧 Tour assigned email sent to {} for property {}", to_email, property_title);
+        Ok(())
+    }
+
+    /// Email to client: Tour fulfilled with viewing link ⭐ MOST IMPORTANT
+    pub async fn send_tour_fulfilled(
+        &self,
+        to_email: &str,
+        client_name: Option<&str>,
+        property_title: &str,
+        viewing_url: &str,
+        expires_at: &str,
+        viewing_link_base: &str,
+    ) -> Result<(), RentoError> {
+        let recipient = if let Some(name) = client_name {
+            format!("{} <{}>", name, to_email)
+        } else {
+            to_email.to_string()
+        };
+
+        let email = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("🎥 Your Virtual Tour of {} is Ready!", property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_fulfilled_template(
+                        client_name.unwrap_or("there"),
+                        property_title,
+                        viewing_url,
+                        expires_at,
+                        viewing_link_base,
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        let transport = self.build_transport()?;
+        transport.send(&email)
+            .map_err(|e| RentoError::Email(format!("Failed to send email: {}", e)))?;
+
+        tracing::info!("📧 Tour fulfillment email sent to {} with viewing link", to_email);
+        Ok(())
+    }
+
+    /// Email to client + agent: Tour expired (SLA missed)
+    pub async fn send_tour_expired(
+        &self,
+        client_email: &str,
+        client_name: Option<&str>,
+        agent_email: &str,
+        agent_name: &str,
+        property_title: &str,
+        fee_amount: f64,
+    ) -> Result<(), RentoError> {
+        // Send to client
+        let client_recipient = if let Some(name) = client_name {
+            format!("{} <{}>", name, client_email)
+        } else {
+            client_email.to_string()
+        };
+
+        let client_email_msg = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(client_recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("❌ Your Tour Request for {} has Expired", property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_expired_client_template(
+                        client_name.unwrap_or("there"),
+                        property_title,
+                        fee_amount,
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        // Send to agent
+        let agent_recipient = format!("{} <{}>", agent_name, agent_email);
+        let agent_email_msg = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(agent_recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("⚠️ SLA Missed: Tour for {} Expired", property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_expired_agent_template(
+                        agent_name,
+                        property_title,
+                        client_name.unwrap_or("Client"),
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        let transport = self.build_transport()?;
+        transport.send(&client_email_msg)
+            .map_err(|e| RentoError::Email(format!("Failed to send client email: {}", e)))?;
+        transport.send(&agent_email_msg)
+            .map_err(|e| RentoError::Email(format!("Failed to send agent email: {}", e)))?;
+
+        tracing::info!("📧 Tour expired emails sent to client ({}) and agent ({})", client_email, agent_email);
+        Ok(())
+    }
+
+    /// Email to agent: SLA warning (6 hours remaining)
+    pub async fn send_tour_sla_warning(
+        &self,
+        to_email: &str,
+        agent_name: &str,
+        property_title: &str,
+        client_name: &str,
+        hours_remaining: i64,
+    ) -> Result<(), RentoError> {
+        let recipient = format!("{} <{}>", agent_name, to_email);
+
+        let email = Message::builder()
+            .from(format!("{} <{}>", self.from_name, self.from_email).parse()
+                .map_err(|e| RentoError::Email(format!("Invalid from address: {}", e)))?)
+            .to(recipient.parse()
+                .map_err(|e| RentoError::Email(format!("Invalid to address: {}", e)))?)
+            .subject(format!("⚠️ URGENT: {} hours left to fulfill tour for {}", hours_remaining, property_title))
+            .singlepart(
+                SinglePart::builder()
+                    .header(lettre::message::header::ContentType::TEXT_HTML)
+                    .body(self.tour_sla_warning_template(
+                        agent_name,
+                        property_title,
+                        client_name,
+                        hours_remaining,
+                    )),
+            )
+            .map_err(|e| RentoError::Email(format!("Email build error: {}", e)))?;
+
+        let transport = self.build_transport()?;
+        transport.send(&email)
+            .map_err(|e| RentoError::Email(format!("Failed to send email: {}", e)))?;
+
+        tracing::info!("📧 SLA warning email sent to {} ({}h remaining)", to_email, hours_remaining);
+        Ok(())
+    }
     fn subscription_confirmation_template(&self, amount: f64, plan_name: &str, receipt_number: &str, end_date: &str) -> String {
         let end_date_display = if end_date.len() > 10 { &end_date[..10] } else { end_date };
         format!(
@@ -573,6 +803,253 @@ impl EmailService {
 </body>
 </html>"#,
             plan_name, plan_name, amount, end_date_display, receipt_number, plan_name
+        )
+    }
+    // ───────────────────────────────────────────
+    // TOUR EMAIL TEMPLATES
+    // ───────────────────────────────────────────
+
+    fn tour_requested_template(
+        &self,
+        client_name: &str,
+        property_title: &str,
+        property_location: &str,
+        fee_amount: f64,
+        tour_request_id: &str,
+        payment_instructions: &str,
+    ) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #FFD700; padding-bottom: 20px;">
+        <h1 style="color: #1a1a1a; margin: 0;">🎬 Virtual Tour Requested</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">We've received your request for a virtual tour of:</p>
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #FFD700;">
+            <h2 style="margin: 0; color: #1a1a1a;">🏠 {}</h2>
+            <p style="margin: 8px 0 0; color: #666;">📍 {}</p>
+        </div>
+        <p style="font-size: 16px; color: #333;">To proceed, please pay the tour fee of <strong>KES {:.2}</strong>.</p>
+        <div style="background: #fff3cd; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 0; color: #856404;"><strong>💳 Payment Instructions:</strong></p>
+            <p style="margin: 8px 0 0; color: #856404;">{}</p>
+        </div>
+        <p style="font-size: 14px; color: #666;">Your request ID: <code>{}</code></p>
+        <p style="font-size: 14px; color: #666;">Once payment is confirmed, our agent will record a fresh, watermarked video tour within 24 hours.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">This email was sent by Rento — Your trusted property partner</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            client_name, property_title, property_location, fee_amount, payment_instructions, tour_request_id
+        )
+    }
+
+    fn tour_assigned_template(
+        &self,
+        agent_name: &str,
+        property_title: &str,
+        property_location: &str,
+        client_name: &str,
+        sla_deadline: &str,
+    ) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #FF6B6B; padding-bottom: 20px;">
+        <h1 style="color: #FF6B6B; margin: 0;">⏰ New Tour Assignment</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">A new virtual tour has been assigned to you:</p>
+        <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #FF6B6B;">
+            <h2 style="margin: 0; color: #1a1a1a;">🏠 {}</h2>
+            <p style="margin: 8px 0 0; color: #666;">📍 {}</p>
+            <p style="margin: 8px 0 0; color: #666;">👤 Client: {}</p>
+        </div>
+        <div style="background: #f8d7da; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 0; color: #721c24; font-size: 16px;"><strong>⏰ SLA Deadline: {}</strong></p>
+            <p style="margin: 8px 0 0; color: #721c24;">You have <strong>24 hours</strong> to fulfill this tour. Use the Native Recorder in your Tour Studio.</p>
+        </div>
+        <p style="font-size: 14px; color: #666;">Remember: All tours must be recorded using the in-app recorder with automatic watermarking.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">Rento Agent Portal</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            agent_name, property_title, property_location, client_name, sla_deadline
+        )
+    }
+
+    fn tour_fulfilled_template(
+        &self,
+        client_name: &str,
+        property_title: &str,
+        viewing_url: &str,
+        expires_at: &str,
+        viewing_link_base: &str,
+    ) -> String {
+        let full_url = format!("{}{}", viewing_link_base, viewing_url);
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #28a745; padding-bottom: 20px;">
+        <h1 style="color: #28a745; margin: 0;">🎥 Your Tour is Ready!</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">Great news! Your virtual tour is now available:</p>
+        <div style="background: #d4edda; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; text-align: center;">
+            <h2 style="margin: 0 0 12px; color: #155724;">🏠 {}</h2>
+            <a href="{}" style="display: inline-block; background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">▶ Watch Your Tour</a>
+        </div>
+        <div style="background: #fff3cd; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 0; color: #856404;"><strong>⚠️ Important — Please read carefully:</strong></p>
+            <ul style="margin: 8px 0 0; color: #856404; padding-left: 20px;">
+                <li>This link is <strong>locked to your device</strong>. It cannot be opened on another device.</li>
+                <li>The link expires in <strong>2 hours</strong> from when you first click it.</li>
+                <li>Expires at: <strong>{}</strong></li>
+                <li>Do NOT share this link — it is tied to your payment.</li>
+            </ul>
+        </div>
+        <p style="font-size: 14px; color: #666;">Your tour has been professionally watermarked with our R3NTO authenticity seal, guaranteeing it was recorded live on-site.</p>
+        <p style="font-size: 14px; color: #666;">If you have any issues viewing your tour, please contact support.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">Thank you for choosing Rento — Your trusted property partner</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            client_name, property_title, full_url, expires_at
+        )
+    }
+
+    fn tour_expired_client_template(
+        &self,
+        client_name: &str,
+        property_title: &str,
+        fee_amount: f64,
+    ) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #dc3545; padding-bottom: 20px;">
+        <h1 style="color: #dc3545; margin: 0;">❌ Tour Request Expired</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">We regret to inform you that your virtual tour request for <strong>{}</strong> has expired because the agent did not fulfill it within the 24-hour SLA window.</p>
+        <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc3545;">
+            <h3 style="margin: 0 0 12px; color: #721c24;">💰 Refund Information</h3>
+            <p style="margin: 0; color: #721c24;">Your payment of <strong>KES {:.2}</strong> will be refunded within 3-5 business days to your original payment method.</p>
+        </div>
+        <p style="font-size: 16px; color: #333;">We apologize for the inconvenience. You may request a new tour at any time.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">Rento — Your trusted property partner</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            client_name, property_title, fee_amount
+        )
+    }
+
+    fn tour_expired_agent_template(
+        &self,
+        agent_name: &str,
+        property_title: &str,
+        client_name: &str,
+    ) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #dc3545; padding-bottom: 20px;">
+        <h1 style="color: #dc3545; margin: 0;">⚠️ SLA Missed</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">You missed the 24-hour SLA deadline for this tour:</p>
+        <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc3545;">
+            <h3 style="margin: 0; color: #721c24;">🏠 {}</h3>
+            <p style="margin: 8px 0 0; color: #721c24;">👤 Client: {}</p>
+        </div>
+        <div style="background: #fff3cd; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 0; color: #856404;"><strong>Impact on your performance:</strong></p>
+            <ul style="margin: 8px 0 0; color: #856404; padding-left: 20px;">
+                <li>Your SLA compliance rate has decreased</li>
+                <li>The client has been notified and will receive a refund</li>
+                <li>This affects your position on the leaderboard</li>
+            </ul>
+        </div>
+        <p style="font-size: 14px; color: #666;">Please prioritize future tour assignments to maintain your standing on the platform.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">Rento Agent Portal</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            agent_name, property_title, client_name
+        )
+    }
+
+    fn tour_sla_warning_template(
+        &self,
+        agent_name: &str,
+        property_title: &str,
+        client_name: &str,
+        hours_remaining: i64,
+    ) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0;">
+<div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+    <div style="text-align: center; border-bottom: 2px solid #ffc107; padding-bottom: 20px;">
+        <h1 style="color: #856404; margin: 0;">⚠️ SLA Warning: {} Hours Left</h1>
+    </div>
+    <div style="padding: 20px 0;">
+        <p style="font-size: 16px; color: #333;">Hi <strong>{}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">You have a pending tour that is due soon:</p>
+        <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
+            <h3 style="margin: 0; color: #856404;">🏠 {}</h3>
+            <p style="margin: 8px 0 0; color: #856404;">👤 Client: {}</p>
+            <p style="margin: 8px 0 0; color: #856404;"><strong>⏰ Time remaining: {} hours</strong></p>
+        </div>
+        <p style="font-size: 16px; color: #dc3545;"><strong>Please record and upload the tour ASAP to avoid an SLA miss.</strong></p>
+        <p style="font-size: 14px; color: #666;">Check your Tour Studio for the recording interface.</p>
+    </div>
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee;">
+        <p style="color: #999; font-size: 12px; margin: 0;">Rento Agent Portal</p>
+    </div>
+</div>
+</body>
+</html>"#,
+            hours_remaining, agent_name, property_title, client_name, hours_remaining
         )
     }
 }

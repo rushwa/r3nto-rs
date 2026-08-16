@@ -2681,17 +2681,215 @@ pub async fn get_leaderboard(
 // ═══════════════════════════════════════════
 // VIRTUAL TOUR SYSTEM
 // ═══════════════════════════════════════════
-
 pub const TOUR_FEE_KES: f64 = 20.00;
 pub const TOUR_SLA_HOURS: i64 = 24;
 pub const VIEWING_WINDOW_MINUTES: i64 = 120;
 
+#[derive(Deserialize)]
+pub struct UploadTourVideoRequest {
+    pub tour_request_id: String,
+    pub video_url: String,
+    pub thumbnail_url: Option<String>,
+    pub duration_seconds: Option<i32>,
+    pub file_size_bytes: Option<i64>,
+    pub device_fingerprint: Option<String>,
+    pub recording_started_at: Option<String>,
+    pub recording_completed_at: Option<String>,
+}
+
+// ───────────────────────────────────────────
+// 1. Request a Virtual Tour (Client side)
+// ✅ MILESTONE 6: Sends email to client with payment instructions
+// ───────────────────────────────────────────
+pub async fn request_virtual_tour(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,  // ✅ NEW
+    property_id: &str,
+    client_email: &str,
+    client_name: Option<&str>,
+    client_phone: Option<&str>,
+    client_id: Option<&Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let prop_uuid = Uuid::parse_str(property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+
+    // Check property exists and is not delisted
+    let property_check: Option<(bool, Uuid)> = sqlx::query_as(
+        "SELECT COALESCE(is_delisted, FALSE), owner_id FROM properties WHERE id = $1"
+    )
+        .bind(prop_uuid)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (is_delisted, owner_id) = match property_check {
+        Some(p) => p,
+        None => return Err(ApiError::NotFound("Property not found".into())),
+    };
+
+    if is_delisted {
+        return Err(ApiError::BadRequest(
+            "This property is no longer available for viewing".into()
+        ));
+    }
+
+    // ✅ Get property title and location for the email
+    let property_info: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT title, location FROM properties WHERE id = $1"
+    )
+        .bind(prop_uuid)
+        .fetch_optional(pool(db))
+        .await?;
+    let (property_title, property_location) = property_info
+        .unwrap_or_else(|| ("Unknown Property".to_string(), None));
+
+    // Find the assigned agent (property owner's converting agent)
+    let assigned_agent: Option<Uuid> = sqlx::query_scalar(
+        "SELECT agent_id FROM agent_conversions WHERE property_owner_id = $1 LIMIT 1"
+    )
+        .bind(owner_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    // Create tour request with 24-hour SLA
+    let sla_deadline = chrono::Utc::now() + chrono::Duration::hours(TOUR_SLA_HOURS);
+
+    let request_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO virtual_tour_requests
+            (property_id, client_id, client_email, client_name, client_phone,
+             fee_amount, assigned_agent_id, sla_deadline)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+        "#
+    )
+        .bind(prop_uuid)
+        .bind(client_id)
+        .bind(client_email)
+        .bind(client_name)
+        .bind(client_phone)
+        .bind(TOUR_FEE_KES)
+        .bind(assigned_agent)
+        .bind(sla_deadline)
+        .fetch_one(pool(db))
+        .await?;
+
+    // ✅ SEND EMAIL to client with payment instructions
+    let payment_instructions = format!(
+        "Pay KES {:.2} via M-Pesa or bank transfer to activate your tour. \
+         Our agent will record a fresh, watermarked video tour within 24 hours of payment confirmation.",
+        TOUR_FEE_KES
+    );
+    let _ = email_service.send_tour_requested(
+        client_email,
+        client_name,
+        &property_title,
+        property_location.as_deref(),
+        TOUR_FEE_KES,
+        &request_id.to_string(),
+        &payment_instructions,
+    ).await.map_err(|e| tracing::warn!("⚠️ Failed to send tour requested email to {}: {}", client_email, e));
+
+    tracing::info!(
+        "🎬 Virtual tour requested: {} for property {} (SLA: {}h)",
+        request_id, property_id, TOUR_SLA_HOURS
+    );
+
+    Ok(serde_json::json!({
+        "request_id": request_id.to_string(),
+        "fee_amount": TOUR_FEE_KES,
+        "sla_deadline": sla_deadline.to_string(),
+        "message": format!("Tour request created. Pay KES {:.2} to proceed.", TOUR_FEE_KES),
+    }))
+}
+
+// ───────────────────────────────────────────
+// 2. Confirm Payment for Tour
+// ✅ MILESTONE 6: Sends email to agent with new assignment + SLA deadline
+// ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 2. Confirm Payment for Tour
+// ✅ MILESTONE 6: Sends email to agent with new assignment + SLA deadline
+// ───────────────────────────────────────────
+pub async fn confirm_tour_payment(
+    db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,
+    request_id: &str,
+    payment_reference: &str,
+) -> ApiResult<serde_json::Value> {
+    let id = Uuid::parse_str(request_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid request ID: {}", e)))?;
+
+    // ✅ FIXED: Correct tuple types matching DB schema
+    // (agent_id, client_name, property_title, property_location, agent_name, sla_deadline)
+    let tour_details: Option<(Uuid, Option<String>, String, Option<String>, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        r#"
+        SELECT tr.assigned_agent_id, tr.client_name, p.title, p.location,
+               COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username),
+               tr.sla_deadline
+        FROM virtual_tour_requests tr
+        JOIN properties p ON tr.property_id = p.id
+        LEFT JOIN account_users u ON tr.assigned_agent_id = u.id
+        WHERE tr.id = $1
+        "#
+    )
+        .bind(id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE virtual_tour_requests
+        SET fee_paid = TRUE,
+            payment_reference = $1,
+            status = 'pending',
+            updated_at = NOW()
+        WHERE id = $2 AND fee_paid = FALSE
+        "#
+    )
+        .bind(payment_reference)
+        .bind(id)
+        .execute(pool(db))
+        .await?;
+
+    // ✅ SEND EMAIL to agent
+    if let Some((agent_id, client_name, property_title, property_location, agent_name, sla_deadline)) = tour_details {
+        let agent_email: Option<String> = sqlx::query_scalar(
+            "SELECT email FROM account_users WHERE id = $1"
+        )
+            .bind(agent_id)
+            .fetch_optional(pool(db))
+            .await
+            .unwrap_or(None);
+
+        if let Some(agent_email_str) = agent_email {
+            let _ = email_service.send_tour_assigned(
+                &agent_email_str,
+                &agent_name,
+                &property_title,
+                property_location.as_deref(),                 // Option<String> -> Option<&str>
+                client_name.as_deref().unwrap_or("Client"),   // Option<String> -> &str
+                &sla_deadline.to_string(),
+            ).await.map_err(|e| tracing::warn!("⚠️ Failed to send tour assigned email: {}", e));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "message": "Payment confirmed. Agent will fulfill tour within 24 hours.",
+        "status": "pending"
+    }))
+}
 // ───────────────────────────────────────────
 // 3. Agent Uploads Native-Recorded Video
+// ✅ MILESTONE 6: Auto-generates viewing link + sends email to client
 // ───────────────────────────────────────────
-
+// ───────────────────────────────────────────
+// 3. Agent Uploads Native-Recorded Video
+// ✅ MILESTONE 6: Auto-generates viewing link + sends email to client
+// ───────────────────────────────────────────
 pub async fn upload_tour_video(
     db: &rento_core::Database,
+    email_service: &rento_core::email::EmailService,  // ✅ NEW
+    viewing_link_base: &str,  // ✅ NEW (e.g., "http://localhost:3001")
     agent_id: &Uuid,
     req: &UploadTourVideoRequest,
 ) -> ApiResult<serde_json::Value> {
@@ -2763,6 +2961,55 @@ pub async fn upload_tour_video(
     // Update agent SLA metrics
     update_agent_sla_on_fulfill(db, agent_id, tour_id).await?;
 
+    // ✅ AUTO-GENERATE viewing link + EMAIL CLIENT
+    // Types: (client_email, client_name, property_title, video_url)
+    let tour_details: Option<(String, Option<String>, String, String)> = sqlx::query_as(
+        r#"
+        SELECT tr.client_email, tr.client_name, p.title, v.video_url
+        FROM virtual_tour_requests tr
+        JOIN properties p ON tr.property_id = p.id
+        JOIN virtual_tour_videos v ON v.tour_request_id = tr.id
+        WHERE tr.id = $1
+        ORDER BY v.created_at DESC
+        LIMIT 1
+        "#
+    )
+        .bind(tour_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let mut generated_viewing_url: Option<String> = None;
+
+    if let Some((client_email, client_name, property_title, _video_url)) = tour_details {
+        // Generate viewing link automatically (no client_id since this is agent-initiated)
+        let viewing_result = generate_viewing_link(db, &tour_id.to_string(), None).await;
+
+        if let Ok(viewing_data) = viewing_result {
+            let viewing_url = viewing_data.get("viewing_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let expires_at = viewing_data.get("expires_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            generated_viewing_url = Some(format!("{}{}", viewing_link_base, viewing_url));
+
+            // ✅ SEND "Tour Ready" email to client
+            let _ = email_service.send_tour_fulfilled(
+                &client_email,
+                client_name.as_deref(),   // Option<String> -> Option<&str>
+                &property_title,
+                viewing_url,
+                expires_at,
+                viewing_link_base,
+            ).await.map_err(|e| tracing::warn!("⚠️ Failed to send tour fulfilled email to {}: {}", client_email, e));
+
+            tracing::info!("📧 Auto-generated viewing link and emailed client {}", client_email);
+        } else {
+            tracing::warn!("⚠️ Failed to auto-generate viewing link for tour {}", tour_id);
+        }
+    }
+
     tracing::info!(
         "🎬 Agent {} uploaded tour video {} for request {} (watermarked)",
         agent_id, video_id, tour_id
@@ -2775,150 +3022,22 @@ pub async fn upload_tour_video(
             "agent_id": agent_id.to_string(),
             "timestamp": chrono::Utc::now().to_string(),
             "logo": "R3NTO",
-        }
+        },
+        "client_notified": generated_viewing_url.is_some(),
     }))
 }
-
-// ───────────────────────────────────────────
-// 5. Access Tour Video (validates 2-hour + device lock)
-// ───────────────────────────────────────────
-
-// ───────────────────────────────────────────
-// 1. Request a Virtual Tour (Client side)
-// ───────────────────────────────────────────
-pub async fn request_virtual_tour(
-    db: &rento_core::Database,
-    property_id: &str,
-    client_email: &str,
-    client_name: Option<&str>,
-    client_phone: Option<&str>,
-    client_id: Option<&Uuid>,
-) -> ApiResult<serde_json::Value> {
-    let prop_uuid = Uuid::parse_str(property_id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
-
-    // Check property exists and is not delisted
-    let property_check: Option<(bool, Uuid)> = sqlx::query_as(
-        "SELECT COALESCE(is_delisted, FALSE), owner_id FROM properties WHERE id = $1"
-    )
-        .bind(prop_uuid)
-        .fetch_optional(pool(db))
-        .await?;
-
-    let (is_delisted, owner_id) = match property_check {
-        Some(p) => p,
-        None => return Err(ApiError::NotFound("Property not found".into())),
-    };
-
-    if is_delisted {
-        return Err(ApiError::BadRequest(
-            "This property is no longer available for viewing".into()
-        ));
-    }
-
-    // Find the assigned agent (property owner's converting agent)
-    let assigned_agent: Option<Uuid> = sqlx::query_scalar(
-        "SELECT agent_id FROM agent_conversions WHERE property_owner_id = $1 LIMIT 1"
-    )
-        .bind(owner_id)
-        .fetch_optional(pool(db))
-        .await?;
-
-    // Create tour request with 24-hour SLA
-    let sla_deadline = chrono::Utc::now() + chrono::Duration::hours(TOUR_SLA_HOURS);
-
-    let request_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO virtual_tour_requests
-            (property_id, client_id, client_email, client_name, client_phone,
-             fee_amount, assigned_agent_id, sla_deadline)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id
-        "#
-    )
-        .bind(prop_uuid)
-        .bind(client_id)
-        .bind(client_email)
-        .bind(client_name)
-        .bind(client_phone)
-        .bind(TOUR_FEE_KES)
-        .bind(assigned_agent)
-        .bind(sla_deadline)
-        .fetch_one(pool(db))
-        .await?;
-
-    tracing::info!(
-        "🎬 Virtual tour requested: {} for property {} (SLA: {}h)",
-        request_id, property_id, TOUR_SLA_HOURS
-    );
-
-    Ok(serde_json::json!({
-        "request_id": request_id.to_string(),
-        "fee_amount": TOUR_FEE_KES,
-        "sla_deadline": sla_deadline.to_string(),
-        "message": format!("Tour request created. Pay KES {:.2} to proceed.", TOUR_FEE_KES),
-    }))
-}
-
-// ───────────────────────────────────────────
-// 2. Confirm Payment for Tour
-// ───────────────────────────────────────────
-pub async fn confirm_tour_payment(
-    db: &rento_core::Database,
-    request_id: &str,
-    payment_reference: &str,
-) -> ApiResult<serde_json::Value> {
-    let id = Uuid::parse_str(request_id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid request ID: {}", e)))?;
-
-    sqlx::query(
-        r#"
-        UPDATE virtual_tour_requests
-        SET fee_paid = TRUE,
-            payment_reference = $1,
-            status = 'pending',
-            updated_at = NOW()
-        WHERE id = $2 AND fee_paid = FALSE
-        "#
-    )
-        .bind(payment_reference)
-        .bind(id)
-        .execute(pool(db))
-        .await?;
-
-    Ok(serde_json::json!({
-        "message": "Payment confirmed. Agent will fulfill tour within 24 hours.",
-        "status": "pending"
-    }))
-}
-
-// ───────────────────────────────────────────
-// 3. Agent Uploads Native-Recorded Video
-// ───────────────────────────────────────────
-#[derive(Deserialize)]
-pub struct UploadTourVideoRequest {
-    pub tour_request_id: String,
-    pub video_url: String,
-    pub thumbnail_url: Option<String>,
-    pub duration_seconds: Option<i32>,
-    pub file_size_bytes: Option<i64>,
-    pub device_fingerprint: Option<String>,
-    pub recording_started_at: Option<String>,
-    pub recording_completed_at: Option<String>,
-}
-
 // ───────────────────────────────────────────
 // 4. Generate Secure Viewing Link (2-hour + device lock)
+// (UNCHANGED - still used for manual share button)
 // ───────────────────────────────────────────
 pub async fn generate_viewing_link(
     db: &rento_core::Database,
     request_id: &str,
-    client_id: Option<Uuid>, // ✅ Changed from Option<&Uuid> to Option<Uuid> (Uuid is Copy)
+    client_id: Option<Uuid>,
 ) -> ApiResult<serde_json::Value> {
     let req_id = Uuid::parse_str(request_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid request ID: {}", e)))?;
 
-    // 1. Get tour request + video
     let tour_info: Option<(Uuid, String, String)> = sqlx::query_as(
         r#"
         SELECT v.id, v.video_url, tr.status
@@ -2949,11 +3068,9 @@ pub async fn generate_viewing_link(
         return Err(ApiError::BadRequest(format!("Tour status is '{}', must be 'fulfilled'", status)));
     }
 
-    // 2. Generate token and expiry
     let viewing_token = format!("vt_{}", Uuid::new_v4().to_string().replace("-", ""));
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(VIEWING_WINDOW_MINUTES);
 
-    // 3. Insert viewing session
     let session_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO tour_viewing_sessions
@@ -2964,7 +3081,7 @@ pub async fn generate_viewing_link(
     )
         .bind(req_id)
         .bind(video_id)
-        .bind(client_id) // ✅ Now passing Option<Uuid> by value (safer for sqlx)
+        .bind(client_id)
         .bind(&viewing_token)
         .bind(expires_at)
         .fetch_one(pool(db))
@@ -2985,6 +3102,7 @@ pub async fn generate_viewing_link(
         "window_minutes": VIEWING_WINDOW_MINUTES,
     }))
 }
+
 // ───────────────────────────────────────────
 // 5. Access Tour Video (validates 2-hour + device lock)
 // ───────────────────────────────────────────
@@ -3014,7 +3132,6 @@ pub async fn access_tour_video(
         None => return Err(ApiError::NotFound("Invalid viewing link".into())),
     };
 
-    // Check 2-hour expiry
     let now = chrono::Utc::now();
     if let Some(expires) = viewing_expires {
         if now > expires {
@@ -3024,14 +3141,10 @@ pub async fn access_tour_video(
         }
     }
 
-    // Device locking logic
     if device_locked {
         if let Some(locked_fp) = locked_fingerprint {
             if locked_fp != device_fingerprint {
-                tracing::warn!(
-                    "🚫 Unauthorized device access attempt on tour session {}",
-                    session_id
-                );
+                tracing::warn!("🚫 Unauthorized device access attempt on tour session {}", session_id);
                 return Err(ApiError::Unauthorized(
                     "This viewing link is locked to a different device".into()
                 ));
@@ -3055,7 +3168,6 @@ pub async fn access_tour_video(
             .await?;
     }
 
-    // Update access count
     sqlx::query(
         r#"
         UPDATE tour_viewing_sessions
@@ -3072,7 +3184,6 @@ pub async fn access_tour_video(
         .execute(pool(db))
         .await?;
 
-    // Get video URL
     let video_url: String = sqlx::query_scalar(
         "SELECT video_url FROM virtual_tour_videos WHERE id = $1"
     )
@@ -3190,7 +3301,6 @@ pub async fn get_agent_pending_tours(
         .await?;
 
     let tours: Vec<serde_json::Value> = rows.into_iter().map(|row| {
-        use sqlx::Row;
         let seconds_remaining: i32 = row.try_get("seconds_remaining").unwrap_or(0);
         let urgency = if seconds_remaining < 3600 {
             "critical"
@@ -3224,7 +3334,6 @@ pub async fn get_agent_pending_tours(
 
 // ───────────────────────────────────────────
 // 8. Agent Tour History (all statuses)
-// ✅ NO Decimal — fee_amount cast to TEXT
 // ───────────────────────────────────────────
 pub async fn get_agent_tour_history(
     db: &rento_core::Database,
@@ -3279,7 +3388,6 @@ pub async fn get_agent_tour_history(
     let rows = q.fetch_all(pool(db)).await?;
 
     let history: Vec<serde_json::Value> = rows.into_iter().map(|row| {
-        use sqlx::Row;
         serde_json::json!({
             "id": row.try_get::<String, _>("id").unwrap_or_default(),
             "client_name": row.try_get::<Option<String>, _>("client_name").ok().flatten(),
@@ -3303,7 +3411,6 @@ pub async fn get_agent_tour_history(
 
 // ───────────────────────────────────────────
 // 9. Agent SLA Performance Stats
-// ✅ NO Decimal — SUM cast to TEXT
 // ───────────────────────────────────────────
 pub async fn get_agent_sla_stats(
     db: &rento_core::Database,
@@ -3328,7 +3435,6 @@ pub async fn get_agent_sla_stats(
     let (total, on_time, late, expired, avg_minutes) = metrics
         .unwrap_or((0, 0, 0, 0, 0));
 
-    // ✅ Revenue read as String via ::TEXT cast (no Decimal needed)
     let revenue: Option<String> = sqlx::query_scalar(
         r#"
         SELECT COALESCE(SUM(fee_amount), 0)::TEXT
@@ -3396,17 +3502,14 @@ async fn update_agent_sla_on_fulfill(
     Ok(())
 }
 
-
 // ───────────────────────────────────────────
 // 10. Validate + Stream Tour Video (secure)
-// Returns the file path if access is allowed
 // ───────────────────────────────────────────
 pub async fn validate_tour_stream_access(
     db: &rento_core::Database,
     viewing_token: &str,
     device_fingerprint: &str,
 ) -> ApiResult<String> {
-    // Get viewing session + video
     let session: Option<(Uuid, Uuid, bool, Option<String>,
                          Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as(
@@ -3429,7 +3532,6 @@ pub async fn validate_tour_stream_access(
 
     let now = chrono::Utc::now();
 
-    // Check 2-hour expiry
     if let Some(expires) = viewing_expires {
         if now > expires {
             return Err(ApiError::BadRequest(
@@ -3438,7 +3540,6 @@ pub async fn validate_tour_stream_access(
         }
     }
 
-    // Device locking
     if device_locked {
         if let Some(locked_fp) = locked_fingerprint {
             if locked_fp != device_fingerprint {
@@ -3449,7 +3550,6 @@ pub async fn validate_tour_stream_access(
             }
         }
     } else {
-        // First access → lock to this device + start 2-hour window
         sqlx::query(
             r#"
             UPDATE tour_viewing_sessions
@@ -3467,7 +3567,6 @@ pub async fn validate_tour_stream_access(
             .await?;
     }
 
-    // Increment access count
     sqlx::query(
         "UPDATE tour_viewing_sessions SET access_count = access_count + 1, last_accessed_at = NOW() WHERE id = $1"
     )
@@ -3475,7 +3574,6 @@ pub async fn validate_tour_stream_access(
         .execute(pool(db))
         .await?;
 
-    // Get the video file path
     let video_url: String = sqlx::query_scalar(
         "SELECT video_url FROM virtual_tour_videos WHERE id = $1"
     )
@@ -3483,7 +3581,6 @@ pub async fn validate_tour_stream_access(
         .fetch_one(pool(db))
         .await?;
 
-    // video_url is like "/uploads/tours/{id}.webm" → convert to filesystem path
     let file_path = video_url.trim_start_matches('/');
     Ok(file_path.to_string())
 }
