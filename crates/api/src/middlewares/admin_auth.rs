@@ -84,7 +84,8 @@ pub async fn admin_auth_middleware(
     // ───────────────────────────────────────────
     let is_client_allowed_route = path == "/api/tours/request"
         || path == "/api/tours/my-tours"   // ✅ ADD THIS
-        || (path.starts_with("/api/tours/") && path.ends_with("/confirm-payment"));
+        || (path.starts_with("/api/tours/") && path.ends_with("/confirm-payment"))
+        || (path.starts_with("/api/tours/") && path.ends_with("/viewing-link"));
     // ───────────────────────────────────────────
     // Property Owner allowed routes
     // ✅ FIX: Added all routes Property Owners need
