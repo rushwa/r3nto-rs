@@ -1,11 +1,13 @@
 #![allow(non_snake_case)]
 
+use crate::router::RouteGuards;
 use dioxus::prelude::*;
 
 mod api;
 mod components;
 mod context;
 mod pages;
+mod router;
 
 use components::navbar::Navbar;
 use context::auth::provide_auth_context;
@@ -17,42 +19,41 @@ use pages::{
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
-    #[layout(Navbar)]
-        #[route("/")]
-        Home {},
+    // ✅ RouteGuards MUST wrap the Navbar layout
+    #[layout(RouteGuards)]
+        #[layout(Navbar)]
+            #[route("/")]
+            Home {},
 
-        #[route("/login")]
-        Login {},
+            #[route("/login")]
+            Login {},
 
-        #[route("/register")]
-        Register {},
+            #[route("/register")]
+            Register {},
 
-        #[route("/dashboard")]
-        Dashboard {},
+            #[route("/dashboard")]
+            Dashboard {},
 
-        #[route("/profile")]
-        Profile {},
+            #[route("/profile")]
+            Profile {},
 
-        #[route("/properties")]
-        Properties {},
+            #[route("/properties")]
+            Properties {},
 
-        // ✅ NEW: Property detail with tour request
-        #[route("/properties/:property_id")]
-        PropertyDetailPage { property_id: String },
+            #[route("/properties/:property_id")]
+            PropertyDetailPage { property_id: String },
 
-        // ✅ NEW: My tours dashboard
-        #[route("/my-tours")]
-        MyToursPage {},
+            #[route("/my-tours")]
+            MyToursPage {},
 
-        // Existing: Tour viewing (public, no auth)
-        #[route("/tour/view/:token")]
-        TourViewPage { token: String },
+            #[route("/tour/view/:token")]
+            TourViewPage { token: String },
+        #[end_layout]
     #[end_layout]
 
     #[route("/:..segments")]
     PageNotFound { segments: Vec<String> },
 }
-
 fn main() {
     dioxus_logger::init(dioxus_logger::tracing::Level::INFO).expect("failed to init logger");
     launch(App);

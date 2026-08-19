@@ -79,6 +79,13 @@ pub async fn admin_auth_middleware(
         || (path.starts_with("/api/tours/") && path.ends_with("/viewing-link"));
 
     // ───────────────────────────────────────────
+    // ✅ NEW: Routes any authenticated user can access (including CLIENT)
+    // These are client-facing actions like requesting tours and paying
+    // ───────────────────────────────────────────
+    let is_client_allowed_route = path == "/api/tours/request"
+        || path == "/api/tours/my-tours"   // ✅ ADD THIS
+        || (path.starts_with("/api/tours/") && path.ends_with("/confirm-payment"));
+    // ───────────────────────────────────────────
     // Property Owner allowed routes
     // ✅ FIX: Added all routes Property Owners need
     // ───────────────────────────────────────────
@@ -97,6 +104,7 @@ pub async fn admin_auth_middleware(
     if !is_admin_or_superuser
         && !(is_agent && is_agent_allowed_route)
         && !(is_property_owner && is_property_owner_allowed_route)
+        && !is_client_allowed_route
     {
         return Err(StatusCode::FORBIDDEN);
     }

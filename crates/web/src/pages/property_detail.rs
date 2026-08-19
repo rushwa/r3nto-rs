@@ -5,10 +5,9 @@ use crate::api::tours::{request_tour, confirm_payment, TourRequestPayload};
 use crate::api::properties::PropertyDetail;
 use crate::Route;
 
-// ═══════════════════════════════════════════
-// Helper: Format currency with thousands separators
-// Converts 1500000.0 -> "1,500,000"
-// ═══════════════════════════════════════════
+const API_BASE: &str = "http://localhost:8000";
+
+/// Helper: Format currency with thousands separators
 fn format_currency(amount: f64) -> String {
     let s = format!("{:.0}", amount);
     let mut result = String::new();
@@ -24,9 +23,10 @@ fn format_currency(amount: f64) -> String {
 
 #[component]
 pub fn PropertyDetailPage(property_id: String) -> Element {
-    let _auth = use_auth();
+    let auth = use_auth();
+    let nav = use_navigator();
 
-    // ✅ Get token from localStorage via get_access_token()
+    // Token for authenticated API calls (only used inside the tour request modal)
     let token: String = get_access_token().unwrap_or_default();
 
     let mut property: Signal<Option<PropertyDetail>> = use_signal(|| None);
@@ -43,12 +43,10 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
     let mut tour_fee: Signal<f64> = use_signal(|| 20.0_f64);
 
     let property_id_clone = property_id.clone();
-    let token_clone = token.clone();
 
-    // Fetch property details
+    // ✅ Fetch from PUBLIC endpoint - no auth header
     use_effect(move || {
         let pid = property_id_clone.clone();
-        let t = token_clone.clone();
         let mut prop_sig = property;
         let mut loading_sig = loading;
         let mut error_sig = error;
@@ -56,8 +54,8 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         spawn(async move {
             let client = reqwest::Client::new();
             let resp = client
-                .get(&format!("http://localhost:8000/admin/properties/{}", pid))
-                .header("Authorization", format!("Bearer {}", t))
+                .get(&format!("{}/api/public/properties/{}", API_BASE, pid))
+                // ❌ NO Authorization header
                 .send()
                 .await;
 
@@ -67,6 +65,9 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                         Ok(data) => prop_sig.set(Some(data)),
                         Err(_) => error_sig.set(Some("Failed to parse property".to_string())),
                     }
+                }
+                Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+                    error_sig.set(Some("Property not found or no longer available".to_string()));
                 }
                 Ok(r) => {
                     error_sig.set(Some(format!("Error: {}", r.status())));
@@ -79,7 +80,34 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         });
     });
 
-    // Handle tour request submission
+    // ═══════════════════════════════════════════
+    // ✅ AUTH-GATED BUTTON HANDLER
+    // ═══════════════════════════════════════════
+    let handle_request_tour_click = {
+        let auth = auth.clone();
+        let nav = nav.clone();
+        move |_: MouseEvent| {
+            if auth.read().is_authenticated {
+                // ✅ Logged in → open modal
+                show_tour_modal.set(true);
+            } else {
+                // 🛑 Not logged in → redirect to login
+                // Pass the current URL so they can come back after login
+                if let Some(window) = web_sys::window() {
+                    if let Ok(pathname) = window.location().pathname() {
+                        let _ = window.local_storage().map(|storage| {
+                            if let Some(s) = storage {
+                                let _ = s.set_item("redirect_after_login", &pathname);
+                            }
+                        });
+                    }
+                }
+                nav.push(Route::Login {});
+            }
+        }
+    };
+
+    // Handle tour request submission (requires auth - token already validated)
     let submit_tour_request = {
         let token = token.clone();
         move |_: MouseEvent| {
@@ -150,6 +178,7 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         tour_client_phone.set(String::new());
     };
 
+    // Loading state
     if *loading.read() {
         return rsx! {
             div { class: "flex items-center justify-center min-h-screen",
@@ -158,12 +187,19 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         };
     }
 
+    // Error state
     if let Some(err) = error.read().as_ref() {
         return rsx! {
-            div { class: "min-h-screen flex items-center justify-center",
-                div { class: "bg-red-50 border border-red-200 rounded-lg p-6 max-w-md",
-                    h2 { class: "text-red-800 font-bold text-lg mb-2", "Error Loading Property" }
-                    p { class: "text-red-600", "{err}" }
+            div { class: "min-h-screen flex items-center justify-center bg-gray-50",
+                div { class: "bg-white rounded-xl shadow-sm p-8 max-w-md text-center",
+                    div { class: "text-5xl mb-4", "😕" }
+                    h2 { class: "text-xl font-bold text-gray-900 mb-2", "Error Loading Property" }
+                    p { class: "text-gray-600 mb-6", "{err}" }
+                    Link {
+                        to: Route::Properties {},
+                        class: "inline-block bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg",
+                        "← Back to Properties"
+                    }
                 }
             }
         };
@@ -178,14 +214,15 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
     let current_status = tour_status.read().clone();
 
     // ═══════════════════════════════════════════
-    // ✅ PRE-COMPUTE ALL VALUES BEFORE rsx! BLOCK
-    // This avoids "Failed to parse formatted segment" errors
+    // Pre-compute ALL values BEFORE rsx! block
+    // (Avoids RSX parse errors)
     // ═══════════════════════════════════════════
-
-    // Price with thousands separators (e.g., "1,500,000")
     let price_display: String = format_currency(prop.price);
+    let is_authenticated: bool = auth.read().is_authenticated;
+    let user_name: String = auth.read().user.as_ref()
+        .map(|u| format!("{} {}", u.first_name, u.last_name).trim().to_string())
+        .unwrap_or_default();
 
-    // Tour account reference (first 8 chars of request ID)
     let account_ref: String = tour_request_id.read()
         .as_ref()
         .map(|s| {
@@ -194,21 +231,16 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         })
         .unwrap_or_else(|| "TOUR-".to_string());
 
-    // Error message (strip "error:" prefix)
     let error_message: String = current_status
         .as_deref()
         .and_then(|s| s.strip_prefix("error:"))
         .unwrap_or("Unknown error")
         .to_string();
 
-    // Fee display
     let fee_display: f64 = *tour_fee.read();
-
-    // Boolean flags
     let is_requesting: bool = current_status.as_deref() == Some("requesting");
     let email_empty: bool = tour_client_email.read().is_empty();
 
-    // Input values (read once for controlled inputs)
     let client_name_val: String = tour_client_name.read().clone();
     let client_email_val: String = tour_client_email.read().clone();
     let client_phone_val: String = tour_client_phone.read().clone();
@@ -217,33 +249,43 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
         div { class: "min-h-screen bg-gray-50",
             // Header
             div { class: "bg-white shadow-sm border-b",
-                div { class: "max-w-6xl mx-auto px-4 py-4",
-                    Link { to: Route::Properties {},
+                div { class: "max-w-6xl mx-auto px-4 py-4 flex justify-between items-center",
+                    Link {
+                        to: Route::Properties {},
                         class: "text-blue-600 hover:text-blue-800 flex items-center gap-2",
                         "← Back to Properties"
+                    }
+                    if is_authenticated {
+                        Link {
+                            to: Route::MyToursPage {},
+                            class: "text-sm text-gray-600 hover:text-gray-900",
+                            "My Tours 🎬"
+                        }
+                    } else {
+                        Link {
+                            to: Route::Login {},
+                            class: "text-sm text-blue-600 hover:text-blue-800",
+                            "Sign In"
+                        }
                     }
                 }
             }
 
             div { class: "max-w-6xl mx-auto px-4 py-8",
                 div { class: "grid grid-cols-1 lg:grid-cols-3 gap-8",
-                    // Main content
+                    // ─── Main content ───
                     div { class: "lg:col-span-2 space-y-6",
-                        // Property image placeholder
                         div { class: "bg-gradient-to-br from-blue-100 to-purple-100 rounded-xl h-96 flex items-center justify-center",
                             span { class: "text-6xl", "🏠" }
                         }
 
-                        // Title and price
                         div {
                             h1 { class: "text-3xl font-bold text-gray-900", "{prop.title}" }
-                            // ✅ FIXED: Uses format_currency() instead of {prop.price:,.0}
                             p { class: "text-2xl font-bold text-blue-600 mt-2",
                                 "KES {price_display}"
                             }
                         }
 
-                        // Details
                         div { class: "bg-white rounded-xl shadow-sm p-6",
                             h2 { class: "text-xl font-bold text-gray-900 mb-4", "Property Details" }
                             div { class: "grid grid-cols-2 gap-4",
@@ -266,7 +308,6 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                             }
                         }
 
-                        // Description
                         if let Some(desc) = &prop.description {
                             if !desc.is_empty() {
                                 div { class: "bg-white rounded-xl shadow-sm p-6",
@@ -277,9 +318,8 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                         }
                     }
 
-                    // Sidebar
+                    // ─── Sidebar ───
                     div { class: "space-y-6",
-                        // Owner info
                         div { class: "bg-white rounded-xl shadow-sm p-6",
                             h3 { class: "font-bold text-gray-900 mb-3", "Property Owner" }
                             div { class: "flex items-center gap-3",
@@ -293,7 +333,9 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                             }
                         }
 
-                        // Virtual Tour Request Card
+                        // ═══════════════════════════════════════════
+                        // 🎬 VIRTUAL TOUR REQUEST CARD
+                        // ═══════════════════════════════════════════
                         div { class: "bg-gradient-to-br from-yellow-50 to-orange-50 rounded-xl shadow-sm p-6 border-2 border-yellow-200",
                             div { class: "flex items-center gap-2 mb-3",
                                 span { class: "text-2xl", "🎬" }
@@ -311,17 +353,36 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                                     "Paid via M-Pesa • 2-hour viewing window • Device-locked"
                                 }
                             }
+
+                            // ✅ AUTH-GATED BUTTON
                             button {
                                 class: "w-full bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-bold py-3 px-4 rounded-lg shadow-md transition-all",
-                                onclick: move |_| show_tour_modal.set(true),
-                                "🎥 Request Virtual Tour"
+                                onclick: handle_request_tour_click,
+                                if is_authenticated {
+                                    "🎥 Request Virtual Tour"
+                                } else {
+                                    "🔐 Sign In to Request Tour"
+                                }
+                            }
+
+                            if !is_authenticated {
+                                p { class: "text-xs text-gray-500 text-center mt-2",
+                                    "You'll need an account to request a tour"
+                                }
+                            } else {
+                                p { class: "text-xs text-green-600 text-center mt-2",
+                                    "✓ Signed in as {user_name}"
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Tour Request Modal
+            // ═══════════════════════════════════════════
+            // 🎬 TOUR REQUEST MODAL
+            // (Only shown when user is authenticated)
+            // ═══════════════════════════════════════════
             if modal_open {
                 div { class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4",
                     div { class: "bg-white rounded-xl shadow-2xl max-w-md w-full p-6",
@@ -424,10 +485,17 @@ pub fn PropertyDetailPage(property_id: String) -> Element {
                                             li { "Link valid for 2 hours, locked to your device" }
                                         }
                                     }
-                                    button {
-                                        class: "w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg",
-                                        onclick: close_modal,
-                                        "Done"
+                                    div { class: "flex gap-2",
+                                        button {
+                                            class: "flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg",
+                                            onclick: close_modal,
+                                            "Done"
+                                        }
+                                        Link {
+                                            to: Route::MyToursPage {},
+                                            class: "flex-1 bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold py-3 px-4 rounded-lg text-center",
+                                            "View My Tours"
+                                        }
                                     }
                                 }
                             },

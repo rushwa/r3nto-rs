@@ -1387,3 +1387,32 @@ pub async fn stream_tour_video(
         Body::from(video_bytes),
     ).into_response()
 }
+
+// ───────────────────────────────────────────
+// Public Property Handlers (No Auth)
+// ───────────────────────────────────────────
+pub async fn get_public_properties(
+    State(state): State<AppState>,
+) -> ApiResult<Json<Vec<Property>>> {
+    let properties = admin_service::get_public_properties(&state.db).await?;
+    Ok(Json(properties))
+}
+
+pub async fn get_public_property_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<PropertyDetail>> {
+    let property = admin_service::get_public_property_detail(&state.db, &id).await?;
+    Ok(Json(property))
+}
+
+// Add at the bottom of handlers/admin.rs
+pub async fn get_my_tours(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let client_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let tours = admin_service::get_client_tours(&state.db, &client_id).await?;
+    Ok(Json(tours))
+}

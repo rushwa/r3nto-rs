@@ -3584,3 +3584,128 @@ pub async fn validate_tour_stream_access(
     let file_path = video_url.trim_start_matches('/');
     Ok(file_path.to_string())
 }
+
+// ═══════════════════════════════════════════
+// PUBLIC PROPERTY LISTINGS (No Auth Required)
+// ═══════════════════════════════════════════
+pub async fn get_public_properties(db: &rento_core::Database) -> ApiResult<Vec<Property>> {
+    let rows: Vec<PropertyDbRow> = sqlx::query_as(
+        r#"
+        SELECT
+            p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
+            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+            COALESCE(p.property_type::text, '') as property_type,
+            0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+            p.created_at
+        FROM properties p
+        JOIN account_users u ON p.owner_id = u.id
+        WHERE p.status = 'available' AND COALESCE(p.is_delisted, FALSE) = FALSE
+        ORDER BY p.created_at DESC
+        "#
+    ).fetch_all(pool(db)).await?;
+    Ok(rows.into_iter().map(Property::from).collect())
+}
+
+pub async fn get_public_property_detail(db: &rento_core::Database, id: &str) -> ApiResult<PropertyDetail> {
+    let property_id = Uuid::parse_str(id).map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            p.id, p.title, p.description, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+            COALESCE(p.property_type::text, '') as property_type,
+            0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+            '{}'::text[] as features, '{}'::text[] as images,
+            p.created_at as listing_date, 0 as views, 0 as inquiries,
+            u.id as owner_id,
+            COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
+            'hidden' as owner_email, 'PROPERTY_OWNER' as owner_role
+        FROM properties p
+        JOIN account_users u ON p.owner_id = u.id
+        WHERE p.id = $1 AND p.status = 'available' AND COALESCE(p.is_delisted, FALSE) = FALSE
+        "#
+    ).bind(property_id).fetch_optional(pool(db)).await?;
+
+    let row = row.ok_or_else(|| ApiError::NotFound("Property not found or not available".into()))?;
+
+    let owner = PropertyOwner {
+        id: row.try_get::<sqlx::types::Uuid, _>("owner_id")?.to_string(),
+        name: row.try_get("owner_name")?,
+        email: "Contact via platform".to_string(), // Hide email publicly
+        role: row.try_get("owner_role")?,
+    };
+
+    Ok(PropertyDetail {
+        id: row.try_get::<sqlx::types::Uuid, _>("id")?.to_string(),
+        title: row.try_get("title")?,
+        description: row.try_get("description")?,
+        price: row.try_get::<f64, _>("price")?,
+        status: row.try_get("status")?,
+        owner,
+        location: row.try_get("location")?,
+        property_type: row.try_get("property_type")?,
+        bedrooms: row.try_get::<i32, _>("bedrooms")? as u32,
+        bathrooms: row.try_get::<i32, _>("bathrooms")? as u32,
+        area_sqft: row.try_get::<i32, _>("area_sqft")? as u32,
+        features: row.try_get::<Vec<String>, _>("features").unwrap_or_default(),
+        images: row.try_get::<Vec<String>, _>("images").unwrap_or_default(),
+        listing_date: row.try_get::<chrono::DateTime<chrono::Utc>, _>("listing_date")?.format("%Y-%m-%d").to_string(),
+        views: row.try_get::<i32, _>("views")? as u32,
+        inquiries: row.try_get::<i32, _>("inquiries")? as u32,
+    })
+}
+
+// Add at the bottom of services/admin.rs
+pub async fn get_client_tours(
+    db: &rento_core::Database,
+    client_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            tr.id::text,
+            tr.client_name,
+            tr.status,
+            tr.fee_amount::TEXT as fee_amount,
+            tr.fee_paid,
+            tr.created_at,
+            tr.fulfilled_at,
+            tr.sla_deadline,
+            p.title as property_title,
+            p.location as property_location,
+            v.video_url,
+            v.duration_seconds
+        FROM virtual_tour_requests tr
+        JOIN properties p ON tr.property_id = p.id
+        LEFT JOIN virtual_tour_videos v ON v.tour_request_id = tr.id
+        WHERE tr.client_id = $1
+        ORDER BY tr.created_at DESC
+        LIMIT 20
+        "#
+    )
+        .bind(client_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let tours: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "client_name": row.try_get::<Option<String>, _>("client_name").ok().flatten(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "fee_amount": row.try_get::<String, _>("fee_amount").unwrap_or_else(|_| "20.00".to_string()),
+            "fee_paid": row.try_get::<bool, _>("fee_paid").unwrap_or(false),
+            "created_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default(),
+            "fulfilled_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("fulfilled_at")
+                .ok().flatten().map(|d| d.format("%Y-%m-%d %H:%M").to_string()),
+            "property_title": row.try_get::<String, _>("property_title").unwrap_or_default(),
+            "property_location": row.try_get::<Option<String>, _>("property_location").ok().flatten(),
+            "video_url": row.try_get::<Option<String>, _>("video_url").ok().flatten(),
+            "duration_seconds": row.try_get::<Option<i32>, _>("duration_seconds").ok().flatten(),
+        })
+    }).collect();
+
+    Ok(tours)
+}

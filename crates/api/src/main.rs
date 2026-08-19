@@ -132,6 +132,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route("/api/public/properties", get(handlers::admin::get_public_properties))
+        .route("/api/public/properties/:id", get(handlers::admin::get_public_property_detail))
         .route("/auth/refresh", post(handlers::auth::refresh_token))
         .route("/auth/verify-email", post(handlers::auth::request_email_otp))
         .route("/auth/verify-email-code", post(handlers::auth::verify_email_code))
@@ -154,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     let protected_routes = Router::new()
         .route("/auth/me", get(handlers::auth::me))
         .route("/auth/logout", post(handlers::auth::logout))
-    .route("/api/payments/registration-fee", post(handlers::payments::pay_registration_fee))
+        .route("/api/payments/registration-fee", post(handlers::payments::pay_registration_fee))
         .route("/api/payments/subscription", post(handlers::payments::pay_subscription));
 
     // Admin routes (with admin auth middleware)
@@ -195,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tours/upload-video", post(handlers::admin::upload_tour_video))
         .route("/api/tours/:id/viewing-link", post(handlers::admin::generate_viewing_link))
         .route("/api/tours/view/:token", post(handlers::admin::access_tour_video))
+        .route("/api/tours/my-tours", get(handlers::admin::get_my_tours))
         .route("/admin/properties/:id/delist", post(handlers::admin::delist_property))
         .route("/admin/agents/pending-tours", get(handlers::admin::get_agent_pending_tours))
         // B2C Payouts

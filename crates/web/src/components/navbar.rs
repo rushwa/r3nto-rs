@@ -44,6 +44,11 @@ pub fn Navbar() -> Element {
                         }
 
                         if is_authenticated {
+                            Link {
+                                to: Route::MyToursPage {},
+                                class: "nav-link text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium",
+                                "🎬 My Tours"
+                            }
                             Link { to: Route::Dashboard {}, class: "text-gray-700 hover:text-blue-600 px-3 py-2",
                                 "Dashboard"
                             }
