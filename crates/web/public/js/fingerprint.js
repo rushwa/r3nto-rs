@@ -1,18 +1,16 @@
-// Generates a stable device fingerprint for tour viewing device-lock
+// crates/web/public/js/fingerprint.js
 (function() {
     'use strict';
 
-    // Simple hash function (djb2)
     function hashString(str) {
         let hash = 5381;
         for (let i = 0; i < str.length; i++) {
             hash = ((hash << 5) + hash) + str.charCodeAt(i);
-            hash = hash & hash;  // Convert to 32-bit integer
+            hash = hash & hash;
         }
         return Math.abs(hash).toString(36);
     }
 
-    // Generate canvas fingerprint
     function getCanvasFingerprint() {
         try {
             const canvas = document.createElement('canvas');
@@ -31,7 +29,6 @@
         }
     }
 
-    // Generate WebGL fingerprint
     function getWebGLFingerprint() {
         try {
             const canvas = document.createElement('canvas');
@@ -48,7 +45,6 @@
         }
     }
 
-    // Main fingerprint generator
     window.RentoFingerprint = {
         generate: function() {
             const components = [
@@ -62,21 +58,12 @@
                 getCanvasFingerprint(),
                 getWebGLFingerprint(),
             ];
-
             const raw = components.join('|');
-            // Combine multiple hashes for stability
             const fp = 'fp_' + hashString(raw) + '_' + hashString(raw.split('').reverse().join(''));
-
-            // Store in localStorage for consistency
-            try {
-                localStorage.setItem('rento_device_fp', fp);
-            } catch (e) {}
-
+            try { localStorage.setItem('rento_device_fp', fp); } catch (e) {}
             return fp;
         },
-
         get: function() {
-            // Return stored fingerprint if available (for consistency)
             try {
                 const stored = localStorage.getItem('rento_device_fp');
                 if (stored) return stored;
@@ -84,6 +71,5 @@
             return this.generate();
         }
     };
-
     console.log('✅ RentoFingerprint initialized');
 })();

@@ -17,7 +17,7 @@ extern "C" {
 // ✅ Base URL where rento-web (client-facing) is served.
 // Adjust the port to match your rento-web dev server.
 // In production: "https://rento.co.ke"
-const CLIENT_BASE_URL: &str = "http://localhost:8080";
+const CLIENT_BASE_URL: &str = "http://localhost:3001";
 
 // API base URL
 const API_BASE_URL: &str = "http://localhost:8000";

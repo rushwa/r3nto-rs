@@ -16,4 +16,6 @@ pub mod commissions;
 pub mod subscriptions;
 pub mod activate;
 pub mod tour_view;
+pub mod property_detail;
+pub mod my_tours;
 

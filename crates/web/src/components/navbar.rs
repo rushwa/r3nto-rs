@@ -50,9 +50,9 @@ pub fn Navbar() -> Element {
                             Link { to: Route::Profile {}, class: "text-gray-700 hover:text-blue-600 px-3 py-2",
                                 "Profile"
                             }
-                            Link { to: Route::Properties {}, class: "text-gray-700 hover:text-blue-600 px-3 py-2",
-                                "Properties"
-                            }
+                            // In your navbar
+                            Link { to: Route::Properties {}, class: "nav-link", "Properties" }
+                            Link { to: Route::MyToursPage {}, class: "nav-link", "My Tours" }
                             span { class: "text-gray-600 px-3 py-2",
                                 "Welcome, {user_name}"
                             }

@@ -12,8 +12,8 @@ use context::auth::provide_auth_context;
 use pages::{
     dashboard::Dashboard, home::Home, login::Login, profile::Profile,
     properties::Properties, register::Register,tour_view::TourViewPage,
+    property_detail::PropertyDetailPage,my_tours::MyToursPage,
 };
-
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
@@ -35,7 +35,16 @@ pub enum Route {
 
         #[route("/properties")]
         Properties {},
-         // ✅ ADD: Tour viewing route (public, no auth)
+
+        // ✅ NEW: Property detail with tour request
+        #[route("/properties/:property_id")]
+        PropertyDetailPage { property_id: String },
+
+        // ✅ NEW: My tours dashboard
+        #[route("/my-tours")]
+        MyToursPage {},
+
+        // Existing: Tour viewing (public, no auth)
         #[route("/tour/view/:token")]
         TourViewPage { token: String },
     #[end_layout]

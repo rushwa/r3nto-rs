@@ -3,27 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RentoLink</title>
-
-    <!-- ✅ Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>RentoLink — Virtual Property Tours</title>
+    <link rel="stylesheet" href="/tailwind.css">
     <script src="/js/fingerprint.js"></script>
-
-    <!-- Fallback dark background so it's not white while loading -->
     <style>
-        body {
-            background-color: #111827; /* gray-900 */
-            color: white;
-            margin: 0;
-            padding: 0;
-        }
-        #main {
-            min-height: 100vh;
-        }
+        body { background-color: #f9fafb; margin: 0; }
+        #main { min-height: 100vh; }
     </style>
 </head>
 <body>
-<!-- ✅ Dioxus mount point -->
 <div id="main"></div>
 </body>
 </html>
