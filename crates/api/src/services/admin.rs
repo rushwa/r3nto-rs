@@ -3030,6 +3030,13 @@ pub async fn upload_tour_video(
 // 4. Generate Secure Viewing Link (2-hour + device lock)
 // (UNCHANGED - still used for manual share button)
 // ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 4. Generate Secure Viewing Link (7-day claim window + 2-hour viewing window)
+// ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 4. Generate Secure Viewing Link (7-day claim + 2-hour viewing)
+// ✅ FIXED: Reuses existing session instead of creating a new one
+// ───────────────────────────────────────────
 pub async fn generate_viewing_link(
     db: &rento_core::Database,
     request_id: &str,
@@ -3038,6 +3045,7 @@ pub async fn generate_viewing_link(
     let req_id = Uuid::parse_str(request_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid request ID: {}", e)))?;
 
+    // 1. Get tour request + video
     let tour_info: Option<(Uuid, String, String)> = sqlx::query_as(
         r#"
         SELECT v.id, v.video_url, tr.status
@@ -3068,8 +3076,65 @@ pub async fn generate_viewing_link(
         return Err(ApiError::BadRequest(format!("Tour status is '{}', must be 'fulfilled'", status)));
     }
 
+    let now = chrono::Utc::now();
+
+    // ✅ CHECK: Does an existing viewing session already exist for this tour?
+    let existing_session: Option<(Uuid, String, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT id, viewing_token, viewing_started_at, viewing_expires_at
+        FROM tour_viewing_sessions
+        WHERE tour_request_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#
+    )
+        .bind(req_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    if let Some((session_id, existing_token, started_at, expires_at)) = existing_session {
+        if let Some(started) = started_at {
+            // ✅ Viewing window has already started (client clicked the link before)
+            if let Some(expires) = expires_at {
+                if now < expires {
+                    // Still within the 2-hour window → REUSE existing session
+                    tracing::info!("♻️ Reusing existing viewing session {} for tour {}", session_id, req_id);
+                    return Ok(serde_json::json!({
+                        "session_id": session_id.to_string(),
+                        "viewing_token": existing_token,
+                        "viewing_url": format!("/tour/view/{}", existing_token),
+                        "video_url": video_url,
+                        "window_minutes": VIEWING_WINDOW_MINUTES,
+                    }));
+                } else {
+                    // ✅ 2-hour window has expired → reject
+                    return Err(ApiError::BadRequest(
+                        "The 2-hour viewing window for this tour has already expired.".into()
+                    ));
+                }
+            }
+        } else {
+            // ✅ Not yet claimed — check if the 7-day claim window is still valid
+            if let Some(claim_deadline) = expires_at {
+                if now < claim_deadline {
+                    // Still within claim window → REUSE existing unclaimed session
+                    tracing::info!("♻️ Reusing unclaimed viewing session {} for tour {}", session_id, req_id);
+                    return Ok(serde_json::json!({
+                        "session_id": session_id.to_string(),
+                        "viewing_token": existing_token,
+                        "viewing_url": format!("/tour/view/{}", existing_token),
+                        "video_url": video_url,
+                        "window_minutes": VIEWING_WINDOW_MINUTES,
+                    }));
+                }
+                // Claim window expired → fall through to create a new session below
+            }
+        }
+    }
+
+    // ✅ No valid existing session → create a NEW one
     let viewing_token = format!("vt_{}", Uuid::new_v4().to_string().replace("-", ""));
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(VIEWING_WINDOW_MINUTES);
+    let claim_deadline = chrono::Utc::now() + chrono::Duration::days(7);
 
     let session_id: Uuid = sqlx::query_scalar(
         r#"
@@ -3083,7 +3148,7 @@ pub async fn generate_viewing_link(
         .bind(video_id)
         .bind(client_id)
         .bind(&viewing_token)
-        .bind(expires_at)
+        .bind(claim_deadline)
         .fetch_one(pool(db))
         .await
         .map_err(|e| {
@@ -3091,18 +3156,16 @@ pub async fn generate_viewing_link(
             ApiError::Internal(format!("Database error: {}", e))
         })?;
 
-    tracing::info!("✅ Generated viewing token {} for tour {}", viewing_token, req_id);
+    tracing::info!("✅ Generated NEW viewing token {} for tour {} (7-day claim window)", viewing_token, req_id);
 
     Ok(serde_json::json!({
         "session_id": session_id.to_string(),
         "viewing_token": viewing_token,
         "viewing_url": format!("/tour/view/{}", viewing_token),
         "video_url": video_url,
-        "expires_at": expires_at.to_string(),
         "window_minutes": VIEWING_WINDOW_MINUTES,
     }))
 }
-
 // ───────────────────────────────────────────
 // 5. Access Tour Video (validates 2-hour + device lock)
 // ───────────────────────────────────────────
@@ -3127,20 +3190,25 @@ pub async fn access_tour_video(
             .await?;
 
     let (session_id, _tour_request_id, video_id, _token, device_locked,
-        locked_fingerprint, _viewing_started, viewing_expires) = match session {
+        locked_fingerprint, viewing_started, viewing_expires) = match session {
         Some(s) => s,
         None => return Err(ApiError::NotFound("Invalid viewing link".into())),
     };
 
     let now = chrono::Utc::now();
-    if let Some(expires) = viewing_expires {
-        if now > expires {
-            return Err(ApiError::BadRequest(
-                "Viewing link has expired. Please request a new tour.".into()
-            ));
+
+    // Check 2-hour expiry
+    if viewing_started.is_some() {
+        if let Some(expires) = viewing_expires {
+            if now > expires {
+                return Err(ApiError::BadRequest(
+                    "Viewing link has expired. The 2-hour viewing window has ended.".into()
+                ));
+            }
         }
     }
 
+    // Device locking logic
     if device_locked {
         if let Some(locked_fp) = locked_fingerprint {
             if locked_fp != device_fingerprint {
@@ -3151,13 +3219,14 @@ pub async fn access_tour_video(
             }
         }
     } else {
+        // First access → lock to this device + start 2-hour window
         sqlx::query(
             r#"
             UPDATE tour_viewing_sessions
             SET device_locked = TRUE,
                 device_fingerprint = $1,
                 locked_at = NOW(),
-                viewing_started_at = COALESCE(viewing_started_at, NOW()),
+                viewing_started_at = NOW(),
                 viewing_expires_at = NOW() + INTERVAL '120 minutes'
             WHERE id = $2
             "#
@@ -3168,6 +3237,7 @@ pub async fn access_tour_video(
             .await?;
     }
 
+    // Update access count
     sqlx::query(
         r#"
         UPDATE tour_viewing_sessions
@@ -3184,6 +3254,7 @@ pub async fn access_tour_video(
         .execute(pool(db))
         .await?;
 
+    // Get video URL
     let video_url: String = sqlx::query_scalar(
         "SELECT video_url FROM virtual_tour_videos WHERE id = $1"
     )
@@ -3191,18 +3262,31 @@ pub async fn access_tour_video(
         .fetch_one(pool(db))
         .await?;
 
-    let remaining_minutes = viewing_expires
+    // ✅ FETCH THE EXACT EXPIRY TIMESTAMP
+    let actual_expires: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT viewing_expires_at FROM tour_viewing_sessions WHERE id = $1"
+    )
+        .bind(session_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    let remaining_minutes = actual_expires
         .map(|e| (e - now).num_minutes().max(0))
         .unwrap_or(VIEWING_WINDOW_MINUTES);
+
+    // ✅ Convert to ISO 8601 string for the frontend
+    let expires_at_iso = actual_expires
+        .map(|e| e.to_rfc3339())
+        .unwrap_or_default();
 
     Ok(serde_json::json!({
         "video_url": video_url,
         "session_id": session_id.to_string(),
         "device_locked": true,
         "remaining_minutes": remaining_minutes,
+        "expires_at": expires_at_iso, // ✅ REQUIRED for frontend timer
     }))
 }
-
 // ───────────────────────────────────────────
 // 6. Agent De-lists Property
 // ───────────────────────────────────────────
@@ -3510,12 +3594,12 @@ pub async fn validate_tour_stream_access(
     viewing_token: &str,
     device_fingerprint: &str,
 ) -> ApiResult<String> {
-    let session: Option<(Uuid, Uuid, bool, Option<String>,
-                         Option<chrono::DateTime<chrono::Utc>>)> =
+    // ✅ Added viewing_started_at to SELECT
+    let session: Option<(Uuid, Uuid, bool, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as(
             r#"
             SELECT vs.id, vs.video_id, vs.device_locked, vs.device_fingerprint,
-                   vs.viewing_expires_at
+                   vs.viewing_started_at, vs.viewing_expires_at
             FROM tour_viewing_sessions vs
             WHERE vs.viewing_token = $1
             "#
@@ -3524,7 +3608,7 @@ pub async fn validate_tour_stream_access(
             .fetch_optional(pool(db))
             .await?;
 
-    let (session_id, video_id, device_locked, locked_fingerprint, viewing_expires) =
+    let (session_id, video_id, device_locked, locked_fingerprint, viewing_started, viewing_expires) =
         match session {
             Some(s) => s,
             None => return Err(ApiError::NotFound("Invalid viewing link".into())),
@@ -3532,11 +3616,14 @@ pub async fn validate_tour_stream_access(
 
     let now = chrono::Utc::now();
 
-    if let Some(expires) = viewing_expires {
-        if now > expires {
-            return Err(ApiError::BadRequest(
-                "This viewing link has expired. Links are valid for 2 hours from first access.".into()
-            ));
+    // ✅ Block stream if 120 minutes have passed
+    if viewing_started.is_some() {
+        if let Some(expires) = viewing_expires {
+            if now > expires {
+                return Err(ApiError::BadRequest(
+                    "This viewing link has expired. The 2-hour window has ended.".into()
+                ));
+            }
         }
     }
 
