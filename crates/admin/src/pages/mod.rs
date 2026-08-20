@@ -25,3 +25,4 @@ pub mod agent_referrals;
 pub mod agent_bonuses;
 pub mod leaderboard;
 pub mod agent_tour_studio;
+pub mod tour_oversight;

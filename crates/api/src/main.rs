@@ -168,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/me", get(handlers::admin::get_current_admin))
         .route("/admin/stats", get(handlers::admin::get_stats))
         .route("/admin/users", get(handlers::admin::get_users))
+        .route("/admin/grant-privileges", post(handlers::admin::update_user_role))
+        .route("/admin/users/:id/role", post(handlers::admin::update_user_role))
         .route("/admin/mpesa/stk-push", post(handlers::mpesa::initiate_payment))
         .route("/admin/agents", get(handlers::admin::get_agents))
         // NOTE: Ensure handlers::admin::get_properties accepts Extension(claims): Extension<Claims>
@@ -200,6 +202,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tours/my-tours", get(handlers::admin::get_my_tours))
         .route("/admin/properties/:id/delist", post(handlers::admin::delist_property))
         .route("/admin/agents/pending-tours", get(handlers::admin::get_agent_pending_tours))
+        // Admin Tour Oversight
+        .route("/admin/tours/all", get(handlers::admin::get_all_tours_admin))
+        .route("/admin/tours/stats", get(handlers::admin::get_tour_stats_admin))
         // B2C Payouts
         .route("/admin/payouts/b2c-history", get(handlers::admin::get_b2c_history))
         .route("/admin/payouts/:id/b2c", post(handlers::admin::process_b2c_payout))
@@ -231,7 +236,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/analytics/market-trends", get(handlers::admin::get_market_trends))
         .route("/admin/settings", get(handlers::admin::get_settings))
         .route("/admin/settings", post(handlers::admin::update_settings))
-        .route("/admin/grant-privileges", post(handlers::admin::grant_admin_privileges))
         // Add to your admin routes
         .route("/admin/agents/tour-history", get(handlers::admin::get_agent_tour_history))
         .route("/admin/agents/sla-stats", get(handlers::admin::get_agent_sla_stats))

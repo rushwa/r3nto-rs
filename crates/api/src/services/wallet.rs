@@ -50,43 +50,30 @@ pub async fn credit_wallet(
     reference: &str,
     description: &str,
 ) -> ApiResult<()> {
-    let wallet_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM agent_wallets WHERE agent_id = $1 FOR UPDATE"
-    )
-        .bind(agent_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(|| ApiError::Internal("Wallet not found".into()))?;
-
-    let current_balance: f64 = sqlx::query_scalar(
-        "SELECT balance::float8 FROM agent_wallets WHERE id = $1"
-    )
-        .bind(wallet_id)
-        .fetch_one(&mut **tx)
-        .await?;
-
-    let new_balance = current_balance + amount;
-
+    // ✅ Must update BOTH balance AND total_earned
     sqlx::query(
-        "UPDATE agent_wallets SET balance = $1, total_earned = total_earned + $2, updated_at = NOW() WHERE id = $3"
+        r#"
+        UPDATE agent_wallets
+        SET balance = balance + $1,
+            total_earned = total_earned + $1,
+            updated_at = NOW()
+        WHERE agent_id = $2
+        "#
     )
-        .bind(new_balance)
         .bind(amount)
-        .bind(wallet_id)
+        .bind(agent_id)
         .execute(&mut **tx)
         .await?;
 
+    // Record in wallet_transactions
     sqlx::query(
         r#"
-        INSERT INTO wallet_transactions
-            (wallet_id, transaction_type, amount, balance_before, balance_after, reference, description)
-        VALUES ($1, 'commission_credit', $2, $3, $4, $5, $6)
+        INSERT INTO wallet_transactions (agent_id, amount, transaction_type, reference, description, status)
+        VALUES ($1, $2, 'credit', $3, $4, 'completed')
         "#
     )
-        .bind(wallet_id)
+        .bind(agent_id)
         .bind(amount)
-        .bind(current_balance)
-        .bind(new_balance)
         .bind(reference)
         .bind(description)
         .execute(&mut **tx)

@@ -111,7 +111,7 @@ pub async fn admin_auth_middleware(
     }
 
     // Extra security: Only superusers can grant privileges
-    if path == "/admin/grant-privileges" && role_upper != "SUPERUSER" {
+    if path == "/admin/grant-privileges" && !is_admin_or_superuser {
         return Err(StatusCode::FORBIDDEN);
     }
 

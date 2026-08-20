@@ -384,7 +384,7 @@ fn HistoryView(
 #[component]
 fn HistoryCard(
     item: serde_json::Value,
-    auth_token: String,  // ✅ Phase 4
+    auth_token: String,
 ) -> Element {
     let client_name = item.get("client_name").and_then(|v| v.as_str()).unwrap_or("Anonymous");
     let property_title = item.get("property_title").and_then(|v| v.as_str()).unwrap_or("");
@@ -395,6 +395,20 @@ fn HistoryCard(
     let duration = item.get("duration_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
     let tour_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
+    // ✅ NEW: Viewing link status
+    let viewing_status = item.get("viewing_status").and_then(|v| v.as_str()).unwrap_or("not_generated");
+    let viewing_expires_at = item.get("viewing_expires_at").and_then(|v| v.as_str()).unwrap_or("");
+
+    let (viewing_color, viewing_icon, viewing_label) = match viewing_status {
+        "expired" => ("bg-red-500/20 text-red-400 border-red-500/30", "⏰", "Viewing Link Expired"),
+        "active" => ("bg-green-500/20 text-green-400 border-green-500/30", "🟢", "Viewing Link Active"),
+        "awaiting_client" => ("bg-blue-500/20 text-blue-400 border-blue-500/30", "🔗", "Awaiting Client Click"),
+        _ => ("bg-gray-500/20 text-gray-400 border-gray-500/30", "—", "No Link Generated"),
+    };
+
+    let is_viewing_expired = viewing_status == "expired";
+    let is_fulfilled = status == "fulfilled";
+
     let (status_color, status_icon, status_label) = match status {
         "fulfilled" => ("bg-green-500/20 text-green-400 border-green-500/30", "✅", "Fulfilled"),
         "expired" => ("bg-red-500/20 text-red-400 border-red-500/30", "⏰", "Expired"),
@@ -403,11 +417,8 @@ fn HistoryCard(
         _ => ("bg-blue-500/20 text-blue-400 border-blue-500/30", "⏳", status),
     };
 
-    // ✅ Phase 4: copied state for this card
     let mut copied = use_signal(|| false);
-    let is_fulfilled = status == "fulfilled";
 
-    // ✅ Phase 4: share handler
     let share_handler = {
         let tid = tour_id.clone();
         let token = auth_token.clone();
@@ -416,7 +427,6 @@ fn HistoryCard(
             let token = token.clone();
             let mut copied_sig = copied;
             spawn(async move {
-                // Call backend to generate viewing link
                 let resp = reqwest::Client::new()
                     .post(&format!("{}/api/tours/{}/viewing-link", API_BASE_URL, tid))
                     .header("Authorization", format!("Bearer {}", token))
@@ -428,10 +438,8 @@ fn HistoryCard(
                         if let Ok(data) = response.json::<serde_json::Value>().await {
                             if let Some(viewing_url) = data.get("viewing_url").and_then(|v| v.as_str()) {
                                 let full_url = format!("{}{}", CLIENT_BASE_URL, viewing_url);
-                                // Copy to clipboard
                                 let _ = JsFuture::from(writeText(&full_url)).await;
                                 copied_sig.set(true);
-                                // Revert after 3 seconds
                                 gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
                                 copied_sig.set(false);
                             }
@@ -463,6 +471,22 @@ fn HistoryCard(
                             }
                         }
                     }
+
+                    // ✅ NEW: Viewing link status badge (only for fulfilled tours)
+                    if is_fulfilled {
+                        div { class: "flex items-center gap-2 mb-2 flex-wrap",
+                            span { class: "px-2 py-0.5 rounded-full text-xs border {viewing_color}",
+                                "{viewing_icon} {viewing_label}"
+                            }
+                            if !viewing_expires_at.is_empty() && viewing_status != "not_generated" {
+                                span { class: "text-gray-500 text-xs",
+                                    if is_viewing_expired { "Expired" } else { "Expires:" }
+                                    " {viewing_expires_at}"
+                                }
+                            }
+                        }
+                    }
+
                     p { class: "text-gray-400 text-sm", "👤 {client_name}" }
                     if duration > 0 {
                         p { class: "text-gray-500 text-xs mt-1",
@@ -473,7 +497,7 @@ fn HistoryCard(
 
                 // ✅ Action buttons
                 div { class: "flex gap-2 flex-wrap",
-                    // Phase 4: Share client link (fulfilled tours only)
+                    // Share client link (fulfilled tours only)
                     if is_fulfilled {
                         button {
                             class: if *copied.read() {
@@ -486,13 +510,22 @@ fn HistoryCard(
                         }
                     }
 
-                    // Agent preview (watch own video)
+                    // ✅ Watch button — DISABLED when viewing link is expired
                     if let Some(url) = video_url {
-                        a {
-                            href: "{API_BASE_URL}{url}",
-                            target: "_blank",
-                            class: "px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg font-medium whitespace-nowrap",
-                            "▶ Watch"
+                        if is_viewing_expired {
+                            button {
+                                class: "px-4 py-2 bg-gray-700 text-gray-500 rounded-lg font-medium whitespace-nowrap cursor-not-allowed opacity-60",
+                                disabled: true,
+                                title: "Viewing window has expired",
+                                "▶ Watch"
+                            }
+                        } else {
+                            a {
+                                href: "{API_BASE_URL}{url}",
+                                target: "_blank",
+                                class: "px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg font-medium whitespace-nowrap",
+                                "▶ Watch"
+                            }
                         }
                     }
                 }
@@ -549,6 +582,28 @@ fn PerformanceView(stats: Option<serde_json::Value>) -> Element {
                     label: "On-Time Rate".to_string(),
                     value: format!("{}%", on_time_rate),
                     color: "purple".to_string(),
+                }
+            }
+            // Inside PerformanceView, add after the existing StatCards:
+            div { class: "bg-gray-800 border border-green-500/30 rounded-lg p-6",
+                h3 { class: "text-white font-bold text-lg mb-3", "💰 Tour Fee Earnings" }
+                p { class: "text-gray-400 text-sm mb-2",
+                    "You earn KES 20 for every tour you fulfill. Funds are credited to your wallet immediately."
+                }
+                div { class: "flex items-center justify-between",
+                    div {
+                        p { class: "text-gray-400 text-sm", "Total Tour Revenue" }
+                        p { class: "text-green-400 text-2xl font-bold", "KES {revenue}" }
+                    }
+                    div { class: "text-right",
+                        p { class: "text-gray-400 text-sm", "Fulfilled Tours" }
+                        p { class: "text-white text-2xl font-bold", "{on_time + late}" }
+                    }
+                }
+                div { class: "mt-4 pt-4 border-t border-gray-700",
+                    p { class: "text-gray-400 text-xs",
+                        "💡 Once your wallet reaches KES 500, you can request a payout from the Payouts page."
+                    }
                 }
             }
 

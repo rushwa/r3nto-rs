@@ -91,6 +91,10 @@ pub fn AdminSidebar() -> Element {
                         SidebarLink { to: crate::AdminRoute::PropertyOwnersPage, icon: "🏘️", label: "Property Owners" }
                         SidebarLink { to: crate::AdminRoute::PropertiesPage, icon: "🏠", label: "Properties" }
                         SidebarLink { to: crate::AdminRoute::InquiriesPage, icon: "📨", label: "All Inquiries" }
+                         div { class: "border-t border-gray-700 my-4" }
+                        // ✅ NEW: Virtual Tours section
+                        p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Virtual Tours" }
+                        SidebarLink { to: crate::AdminRoute::TourOversightPage {}, icon: "🎬", label: "Tour Oversight" }
 
                         div { class: "border-t border-gray-700 my-4" }
                         p { class: "px-4 text-xs text-gray-500 uppercase font-semibold mb-2", "Financial" }

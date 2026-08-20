@@ -202,25 +202,76 @@ pub async fn get_my_commissions_summary(
     let agent_id = Uuid::parse_str(&claims.sub)
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
 
-    // Get wallet info
+    // Get wallet info (includes ALL earnings: handshake + subscription + tour fees)
     let wallet = crate::services::wallet::get_or_create_wallet(&state.db.pool, &agent_id).await?;
 
     // Get recent commissions from ledger
     let recent_commissions = crate::services::commissions::get_agent_commissions(&state.db.pool, &agent_id).await?;
 
-    // Count stats
-    let total_earned = wallet.total_earned;
-    let current_balance = wallet.balance;
-    let commission_count = recent_commissions.len();
+    // ✅ Get earnings breakdown by type
+    let breakdown: Vec<(String, f64, i64)> = sqlx::query_as(
+        r#"
+        SELECT
+            commission_type,
+            COALESCE(SUM(commission_amount)::float8, 0) as total,
+            COUNT(*) as count
+        FROM commission_ledger
+        WHERE agent_id = $1 AND status = 'credited'
+        GROUP BY commission_type
+        ORDER BY total DESC
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(&state.db.pool)
+        .await?;
+
+    let earnings_breakdown: Vec<serde_json::Value> = breakdown.iter().map(|(ctype, total, count)| {
+        let label = match ctype.as_str() {
+            "handshake_30pct" => "Registration Fee Commission (30%)",
+            "subscription_10pct" => "Subscription Commission (10%)",
+            "tour_fee" => "Virtual Tour Fee",
+            "referral_bonus" => "Referral Bonus",
+            other => other,
+        };
+        serde_json::json!({
+            "type": ctype,
+            "label": label,
+            "total": total,
+            "count": count,
+        })
+    }).collect();
+
+    // ✅ Get tour-specific stats
+    let tour_stats: Option<(i64, f64)> = sqlx::query_as(
+        r#"
+        SELECT COUNT(*), COALESCE(SUM(commission_amount)::float8, 0)
+        FROM commission_ledger
+        WHERE agent_id = $1 AND commission_type = 'tour_fee' AND status = 'credited'
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(&state.db.pool)
+        .await
+        .ok();
+
+    let (tours_completed, tour_earnings) = tour_stats.unwrap_or((0, 0.0));
 
     Ok(Json(serde_json::json!({
         "wallet": {
-            "balance": current_balance,
-            "total_earned": total_earned,
+            "balance": wallet.balance,
+            "total_earned": wallet.total_earned,  // ✅ This includes ALL earnings
             "pending_balance": wallet.pending_balance,
             "total_withdrawn": wallet.total_withdrawn,
+            "minimum_payout": 500.0,
+            "can_request_payout": wallet.balance >= 500.0,
         },
-        "recent_commissions": recent_commissions.iter().take(5).map(|c| {
+        "earnings_breakdown": earnings_breakdown,
+        "tour_earnings": {
+            "tours_completed": tours_completed,
+            "total_earned": tour_earnings,
+            "fee_per_tour": 20.0,
+        },
+        "recent_commissions": recent_commissions.iter().take(10).map(|c| {
             serde_json::json!({
                 "id": c.id,
                 "type": c.commission_type,
@@ -230,7 +281,6 @@ pub async fn get_my_commissions_summary(
                 "created_at": c.created_at,
             })
         }).collect::<Vec<_>>(),
-        "total_commission_count": commission_count,
     })))
 }
 #[derive(Deserialize)]
@@ -266,6 +316,44 @@ pub struct UpdateInquiryRequest {
 pub struct GrantPrivilegesRequest {
     pub user_id: String,
     pub grant: bool,
+}
+
+// ───────────────────────────────────────────
+// Full User Role Management DTO
+// ───────────────────────────────────────────
+#[derive(Deserialize)]
+pub struct UpdateUserRoleRequest {
+    pub user_id: String,
+    pub role: Option<String>,
+    pub is_staff: Option<bool>,
+    pub is_superuser: Option<bool>,
+}
+
+// ───────────────────────────────────────────
+// Full User Role Management Handler
+// ───────────────────────────────────────────
+pub async fn update_user_role(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<UpdateUserRoleRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Only SUPERUSER can manage roles
+    if claims.role.to_uppercase() != "SUPERUSER" && claims.role.to_uppercase() != "ADMIN" {
+        return Err(ApiError::Unauthorized("Only admins can manage user roles".to_string()));
+    }
+
+    let user_id = Uuid::parse_str(&req.user_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+
+    let result = admin_service::update_user_role(
+        &state.db,
+        &user_id,
+        req.role.as_deref(),
+        req.is_staff,
+        req.is_superuser,
+    ).await?;
+
+    Ok(Json(result))
 }
 
 // ───────────────────────────────────────────
@@ -1122,7 +1210,6 @@ pub async fn confirm_tour_payment(
     Ok(Json(result))
 }
 
-// ✅ UPDATED: Passes email service + viewing link base
 pub async fn upload_tour_video(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1168,6 +1255,7 @@ pub async fn upload_tour_video(
         }
     }
 
+    // Validate required fields
     let tour_id_str = tour_request_id.ok_or_else(|| {
         ApiError::BadRequest("Missing tour_request_id".into())
     })?;
@@ -1189,11 +1277,13 @@ pub async fn upload_tour_video(
     let filename = format!("{}.{}", file_id, extension);
     let file_path = PathBuf::from("uploads/tours").join(&filename);
 
+    // Ensure directory exists
     fs::create_dir_all("uploads/tours").await.map_err(|e| {
         tracing::error!("Failed to create uploads directory: {}", e);
         ApiError::Internal("Failed to prepare storage".into())
     })?;
 
+    // Write file to disk
     fs::write(&file_path, &video_bytes).await.map_err(|e| {
         tracing::error!("Failed to write video file: {}", e);
         ApiError::Internal("Failed to save video".into())
@@ -1218,11 +1308,11 @@ pub async fn upload_tour_video(
         recording_completed_at: None,
     };
 
-    // ✅ GET viewing link base from env
+    // ✅ Get viewing link base from env
     let viewing_link_base = std::env::var("CLIENT_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:3001".to_string());
 
-    // ✅ PASS EMAIL SERVICE + VIEWING LINK BASE
+    // ✅ Call service with email_service + viewing_link_base
     let result = admin_service::upload_tour_video(
         &state.db,
         &state.email,
@@ -1233,7 +1323,6 @@ pub async fn upload_tour_video(
 
     Ok(Json(result))
 }
-
 // Viewing link handler (unchanged - used for manual share button)
 pub async fn generate_viewing_link(
     State(state): State<AppState>,
@@ -1415,4 +1504,42 @@ pub async fn get_my_tours(
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
     let tours = admin_service::get_client_tours(&state.db, &client_id).await?;
     Ok(Json(tours))
+}
+
+// ───────────────────────────────────────────
+// Admin Tour Oversight
+// ───────────────────────────────────────────
+#[derive(Deserialize)]
+pub struct AdminTourQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn get_all_tours_admin(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<AdminTourQuery>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let role = claims.role.to_uppercase();
+    if role != "ADMIN" && role != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can view all tours".into()));
+    }
+    let tours = admin_service::get_all_tours_admin(
+        &state.db,
+        params.status.as_deref(),
+        params.limit,
+    ).await?;
+    Ok(Json(tours))
+}
+
+pub async fn get_tour_stats_admin(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let role = claims.role.to_uppercase();
+    if role != "ADMIN" && role != "SUPERUSER" {
+        return Err(ApiError::Unauthorized("Only admins can view tour stats".into()));
+    }
+    let stats = admin_service::get_tour_stats_admin(&state.db).await?;
+    Ok(Json(stats))
 }

@@ -1,384 +1,472 @@
 use dioxus::prelude::*;
-use crate::components::sidebar::{PageHeader, StatCard, EmptyState};
+use crate::components::sidebar::{PageHeader, EmptyState};
 use crate::context::admin_auth::use_admin_auth;
-use crate::api::admin::{
-    get_my_commissions_summary, get_my_payout_history, request_payout,
-};
+
+const API_BASE_URL: &str = "http://localhost:8000";
+const MINIMUM_PAYOUT: f64 = 500.0;
 
 #[component]
 pub fn AgentPayoutsPage() -> Element {
     let auth = use_admin_auth();
     let token = auth.read().token.clone().unwrap_or_default();
 
-    let mut wallet_info = use_signal(|| Option::<serde_json::Value>::None);
+    // ─── Data signals ───
+    let mut wallet = use_signal(|| Option::<serde_json::Value>::None);
+    let mut recent_commissions = use_signal(|| Vec::<serde_json::Value>::new());
     let mut payout_history = use_signal(|| Vec::<serde_json::Value>::new());
+    let mut tour_stats = use_signal(|| Option::<serde_json::Value>::None);
     let mut loading = use_signal(|| true);
-    let mut show_request_modal = use_signal(|| false);
-    let mut message = use_signal(|| Option::<String>::None);
-    let mut is_error = use_signal(|| false);
-    let mut fetch_trigger = use_signal(|| 0u32);
 
-    let token_for_effect = token.clone();
+    // ─── Payout form signals ───
+    let mut payout_amount = use_signal(|| String::new());
+    let mut payout_phone = use_signal(|| String::new());
+    let mut submitting = use_signal(|| false);
+    let mut form_message = use_signal(|| Option::<(bool, String)>::None); // (success, message)
 
+    let token_for_wallet = token.clone();
+    let token_for_history = token.clone();
+    let token_for_tours = token.clone();
+
+    // ─── Fetch wallet + commissions summary ───
     use_effect(move || {
-        let _trigger = *fetch_trigger.read();
-        let t = token_for_effect.clone();
+        let t = token_for_wallet.clone();
         spawn(async move {
-            // Fetch wallet info
-            if let Ok(summary) = get_my_commissions_summary(&t).await {
-                wallet_info.set(summary.get("wallet").cloned());
-            }
-            // Fetch payout history
-            if let Ok(history) = get_my_payout_history(&t).await {
-                payout_history.set(history);
+            if let Ok(resp) = reqwest::Client::new()
+                .get(&format!("{}/admin/commissions/my/summary", API_BASE_URL))
+                .header("Authorization", format!("Bearer {}", t))
+                .send().await
+            {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    wallet.set(data.get("wallet").cloned());
+                    if let Some(comms) = data.get("recent_commissions").and_then(|v| v.as_array()) {
+                        recent_commissions.set(comms.clone());
+                    }
+                }
             }
             loading.set(false);
         });
     });
 
-    let balance = wallet_info.read().as_ref()
-        .and_then(|w| w.get("balance"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let total_earned = wallet_info.read().as_ref()
-        .and_then(|w| w.get("total_earned"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let pending_balance = wallet_info.read().as_ref()
-        .and_then(|w| w.get("pending_balance"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let total_withdrawn = wallet_info.read().as_ref()
-        .and_then(|w| w.get("total_withdrawn"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-
-    // Count payout statuses
-    let pending_count = payout_history.read().iter()
-        .filter(|p| p.get("status").and_then(|s| s.as_str()) == Some("pending"))
-        .count();
-    let approved_count = payout_history.read().iter()
-        .filter(|p| p.get("status").and_then(|s| s.as_str()) == Some("approved"))
-        .count();
-
-    if *loading.read() {
-        return rsx! {
-            div { class: "flex items-center justify-center h-96",
-                div { class: "text-white text-lg", "Loading..." }
+    // ─── Fetch payout history ───
+    use_effect(move || {
+        let t = token_for_history.clone();
+        spawn(async move {
+            if let Ok(resp) = reqwest::Client::new()
+                .get(&format!("{}/admin/payouts/my-history", API_BASE_URL))
+                .header("Authorization", format!("Bearer {}", t))
+                .send().await
+            {
+                if let Ok(data) = resp.json::<Vec<serde_json::Value>>().await {
+                    payout_history.set(data);
+                }
             }
-        };
-    }
+        });
+    });
+
+    // ─── Fetch tour stats (tour fee earnings) ───
+    use_effect(move || {
+        let t = token_for_tours.clone();
+        spawn(async move {
+            if let Ok(resp) = reqwest::Client::new()
+                .get(&format!("{}/admin/agents/sla-stats", API_BASE_URL))
+                .header("Authorization", format!("Bearer {}", t))
+                .send().await
+            {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    tour_stats.set(Some(data));
+                }
+            }
+        });
+    });
+
+    // ─── Payout submit handler ───
+    let submit_payout = {
+        let token = token.clone();
+        move |_: MouseEvent| {
+            let t = token.clone();
+            let amount_str = payout_amount.read().clone();
+            let phone = payout_phone.read().clone();
+            let mut submitting_sig = submitting;
+            let mut msg_sig = form_message;
+            let mut amount_sig = payout_amount;
+            let mut phone_sig = payout_phone;
+
+            spawn(async move {
+                let amount: f64 = match amount_str.trim().parse() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        msg_sig.set(Some((false, "Please enter a valid amount".to_string())));
+                        return;
+                    }
+                };
+
+                if amount < MINIMUM_PAYOUT {
+                    msg_sig.set(Some((false, format!("Minimum payout is KES {:.0}", MINIMUM_PAYOUT))));
+                    return;
+                }
+
+                if phone.trim().is_empty() {
+                    msg_sig.set(Some((false, "Please enter your M-Pesa phone number".to_string())));
+                    return;
+                }
+
+                submitting_sig.set(true);
+                msg_sig.set(None);
+
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(&format!("{}/admin/payouts/request", API_BASE_URL))
+                    .header("Authorization", format!("Bearer {}", t))
+                    .json(&serde_json::json!({
+                        "amount": amount,
+                        "mpesa_phone": phone.trim(),
+                    }))
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        msg_sig.set(Some((true, "✅ Payout request submitted! An admin will review it shortly.".to_string())));
+                        amount_sig.set(String::new());
+                        phone_sig.set(String::new());
+                    }
+                    Ok(r) => {
+                        let err = r.text().await.unwrap_or_else(|_| "Request failed".to_string());
+                        msg_sig.set(Some((false, err)));
+                    }
+                    Err(e) => {
+                        msg_sig.set(Some((false, format!("Network error: {}", e))));
+                    }
+                }
+                submitting_sig.set(false);
+            });
+        }
+    };
+
+    // ═══════════════════════════════════════════
+    // Pre-compute values BEFORE rsx! block
+    // ═══════════════════════════════════════════
+    let wallet_data = wallet.read().clone();
+    let balance = wallet_data.as_ref().and_then(|w| w.get("balance")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let total_earned = wallet_data.as_ref().and_then(|w| w.get("total_earned")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let pending = wallet_data.as_ref().and_then(|w| w.get("pending_balance")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let withdrawn = wallet_data.as_ref().and_then(|w| w.get("total_withdrawn")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    // Tour fee earnings (from SLA stats)
+    let tour_data = tour_stats.read().clone();
+    let tour_revenue: f64 = tour_data.as_ref()
+        .and_then(|t| t.get("total_revenue_kes"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let tours_fulfilled: i64 = tour_data.as_ref().map(|t| {
+        t.get("tours_fulfilled_on_time").and_then(|v| v.as_i64()).unwrap_or(0)
+            + t.get("tours_fulfilled_late").and_then(|v| v.as_i64()).unwrap_or(0)
+    }).unwrap_or(0);
+
+    // Commission earnings = total earned minus tour fees
+    let commission_earned = (total_earned - tour_revenue).max(0.0);
+
+    let can_payout = balance >= MINIMUM_PAYOUT;
+    let progress_pct = ((balance / MINIMUM_PAYOUT) * 100.0).min(100.0);
+
+    let is_loading = *loading.read();
+    let is_submitting = *submitting.read();
+    let amount_val = payout_amount.read().clone();
+    let phone_val = payout_phone.read().clone();
+    let msg = form_message.read().clone();
+    let commissions_list = recent_commissions.read().clone();
+    let history_list = payout_history.read().clone();
 
     rsx! {
         div { class: "space-y-6",
             PageHeader {
-                title: "My Wallet & Payouts".to_string(),
-                subtitle: "Manage your earnings and request payouts".to_string(),
+                title: "💸 My Payouts".to_string(),
+                subtitle: "Track earnings from commissions, virtual tours & bonuses, and withdraw to M-Pesa".to_string(),
             }
 
-            // Wallet Stats
-            div { class: "grid grid-cols-1 md:grid-cols-4 gap-4",
-                div { class: "bg-gradient-to-br from-green-900/40 to-gray-800 rounded-lg border border-green-500/30 p-6",
-                    p { class: "text-green-400 text-sm", "💰 Available Balance" }
-                    p { class: "text-3xl font-bold text-white mt-2", "KES {balance as i32}" }
-                    p { class: "text-gray-400 text-xs mt-1", "Ready for payout" }
-                }
-                StatCard {
-                    title: "Total Earned".to_string(),
-                    value: format!("KES {}", total_earned as i32),
-                    icon: "📈".to_string(),
-                    change: "All time".to_string(),
-                    change_positive: true,
-                }
-                StatCard {
-                    title: "Pending Payout".to_string(),
-                    value: format!("KES {}", pending_balance as i32),
-                    icon: "⏳".to_string(),
-                    change: format!("{} request{}", pending_count, if pending_count == 1 { "" } else { "s" }),
-                    change_positive: false,
-                }
-                StatCard {
-                    title: "Total Withdrawn".to_string(),
-                    value: format!("KES {}", total_withdrawn as i32),
-                    icon: "💸".to_string(),
-                    change: format!("{} approved", approved_count),
-                    change_positive: true,
-                }
+            // ─── Wallet Overview Cards ───
+            div { class: "grid grid-cols-2 md:grid-cols-4 gap-4",
+                WalletCard { icon: "💰", label: "Available Balance", value: format!("KES {:.2}", balance), color: "green" }
+                WalletCard { icon: "📈", label: "Total Earned", value: format!("KES {:.2}", total_earned), color: "blue" }
+                WalletCard { icon: "⏳", label: "Pending", value: format!("KES {:.2}", pending), color: "yellow" }
+                WalletCard { icon: "🏦", label: "Total Withdrawn", value: format!("KES {:.2}", withdrawn), color: "purple" }
             }
 
-            if let Some(msg) = message.read().as_ref() {
-                div {
-                    class: if *is_error.read() {
-                        "bg-red-900/20 border border-red-500/30 rounded-lg p-3"
-                    } else {
-                        "bg-green-900/20 border border-green-500/30 rounded-lg p-3"
-                    },
-                    p {
-                        class: if *is_error.read() { "text-red-400" } else { "text-green-400" },
-                        "{msg}"
+            // ─── Earnings Breakdown ───
+            div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                // Tour Fee Earnings
+                div { class: "bg-gray-800 border border-yellow-500/30 rounded-lg p-6",
+                    div { class: "flex items-center justify-between mb-3",
+                        div { class: "flex items-center gap-3",
+                            span { class: "text-3xl", "🎬" }
+                            div {
+                                h3 { class: "text-white font-bold", "Virtual Tour Fees" }
+                                p { class: "text-gray-400 text-sm", "KES 20 per fulfilled tour" }
+                            }
+                        }
+                        span { class: "text-yellow-400 font-bold text-xl", "KES {tour_revenue:.2}" }
+                    }
+                    div { class: "flex items-center justify-between text-sm",
+                        span { class: "text-gray-400", "Tours fulfilled" }
+                        span { class: "text-white font-semibold", "{tours_fulfilled}" }
+                    }
+                }
+
+                // Commission Earnings
+                div { class: "bg-gray-800 border border-blue-500/30 rounded-lg p-6",
+                    div { class: "flex items-center justify-between mb-3",
+                        div { class: "flex items-center gap-3",
+                            span { class: "text-3xl", "🤝" }
+                            div {
+                                h3 { class: "text-white font-bold", "Commissions & Bonuses" }
+                                p { class: "text-gray-400 text-sm", "Handshake, subscription & referrals" }
+                            }
+                        }
+                        span { class: "text-blue-400 font-bold text-xl", "KES {commission_earned:.2}" }
+                    }
+                    div { class: "flex items-center justify-between text-sm",
+                        span { class: "text-gray-400", "Recent transactions" }
+                        span { class: "text-white font-semibold", "{commissions_list.len()}" }
                     }
                 }
             }
 
-            // Request Payout Button
-            div { class: "flex items-center justify-between bg-gray-800 rounded-lg border border-gray-700 p-6",
-                div {
-                    h2 { class: "text-xl font-bold text-white", "Request a Payout" }
-                    p { class: "text-gray-400 text-sm mt-1",
-                        "Minimum payout: KES 500. Funds will be sent to your M-Pesa."
+            // ─── Payout Request Section ───
+            div { class: "grid grid-cols-1 lg:grid-cols-3 gap-6",
+                // Form
+                div { class: "lg:col-span-2 bg-gray-800 border border-gray-700 rounded-lg p-6",
+                    h3 { class: "text-white font-bold text-lg mb-4", "💸 Request a Payout" }
+
+                    // Progress toward minimum
+                    div { class: "mb-5",
+                        div { class: "flex justify-between mb-2 text-sm",
+                            span { class: "text-gray-400", "Progress to minimum payout" }
+                            span { class: if can_payout { "text-green-400 font-semibold" } else { "text-yellow-400 font-semibold" },
+                                "KES {balance:.2} / KES {MINIMUM_PAYOUT:.0}"
+                            }
+                        }
+                        div { class: "w-full bg-gray-700 rounded-full h-3",
+                            div {
+                                class: if can_payout { "bg-green-500 h-3 rounded-full transition-all" } else { "bg-yellow-500 h-3 rounded-full transition-all" },
+                                style: "width: {progress_pct}%"
+                            }
+                        }
+                        if !can_payout {
+                            p { class: "text-gray-500 text-xs mt-2",
+                                "You need KES {(MINIMUM_PAYOUT - balance).max(0.0):.2} more to request a payout. Complete more tours and conversions!"
+                            }
+                        }
+                    }
+
+                    // Form message
+                    if let Some((success, message)) = msg.as_ref() {
+                        div {
+                            class: if *success {
+                                "bg-green-900/20 border border-green-500/30 rounded-lg p-3 mb-4"
+                            } else {
+                                "bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-4"
+                            },
+                            p { class: if *success { "text-green-400 text-sm" } else { "text-red-400 text-sm" }, "{message}" }
+                        }
+                    }
+
+                    // Inputs
+                    div { class: "space-y-4",
+                        div {
+                            label { class: "block text-gray-400 text-sm mb-1", "Amount (KES)" }
+                            input {
+                                class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500",
+                                r#type: "number",
+                                placeholder: "e.g. 500",
+                                value: "{amount_val}",
+                                oninput: move |e| payout_amount.set(e.value()),
+                            }
+                        }
+                        div {
+                            label { class: "block text-gray-400 text-sm mb-1", "M-Pesa Phone Number" }
+                            input {
+                                class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500",
+                                r#type: "tel",
+                                placeholder: "e.g. 0712345678",
+                                value: "{phone_val}",
+                                oninput: move |e| payout_phone.set(e.value()),
+                            }
+                        }
+                        button {
+                            class: if can_payout && !is_submitting {
+                                "w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-4 rounded-lg transition-colors"
+                            } else {
+                                "w-full bg-gray-600 text-gray-400 font-bold py-3 px-4 rounded-lg cursor-not-allowed"
+                            },
+                            disabled: !can_payout || is_submitting,
+                            onclick: submit_payout,
+                            if is_submitting { "Submitting..." }
+                            else if can_payout { "Submit Payout Request" }
+                            else { "Minimum KES 500 Required" }
+                        }
                     }
                 }
-                button {
-                    class: "px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50",
-                    disabled: balance < 500.0 || pending_count > 0,
-                    onclick: move |_| show_request_modal.set(true),
-                    if pending_count > 0 {
-                        "Payout Pending"
-                    } else if balance < 500.0 {
-                        "Min. KES 500 Required"
-                    } else {
-                        "Request Payout →"
+
+                // Info panel
+                div { class: "bg-blue-900/20 border border-blue-500/30 rounded-lg p-6",
+                    h3 { class: "text-blue-400 font-bold mb-3", "ℹ️ How Payouts Work" }
+                    ul { class: "text-gray-300 text-sm space-y-2 list-disc list-inside",
+                        li { "Earn KES 20 for every virtual tour you fulfill" }
+                        li { "Earn commissions from handshake & subscriptions" }
+                        li { "Minimum withdrawal is KES 500" }
+                        li { "Payouts are sent via M-Pesa B2C" }
+                        li { "An admin reviews each request before sending" }
                     }
                 }
             }
 
-            // Payout History
-            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6",
-                h2 { class: "text-xl font-bold text-white mb-4", "Payout History" }
+            // ─── Payout History ───
+            div { class: "bg-gray-800 border border-gray-700 rounded-lg p-6",
+                h3 { class: "text-white font-bold text-lg mb-4", "📜 Payout History" }
 
-                if payout_history.read().is_empty() {
+                if is_loading {
+                    div { class: "flex items-center justify-center py-8",
+                        div { class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" }
+                    }
+                } else if history_list.is_empty() {
                     EmptyState {
                         icon: "💸".to_string(),
-                        title: "No payouts yet".to_string(),
-                        message: "Your payout history will appear here once you request your first payout.".to_string(),
+                        title: "No payout requests yet".to_string(),
+                        message: "Once you reach KES 500, request your first payout here.".to_string(),
+                    }
+                } else {
+                    div { class: "overflow-x-auto",
+                        table { class: "min-w-full divide-y divide-gray-700",
+                            thead {
+                                tr {
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase", "Amount" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase", "Phone" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase", "Status" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase", "Requested" }
+                                }
+                            }
+                            tbody { class: "divide-y divide-gray-700",
+                                for payout in history_list.iter() {
+                                    PayoutRow { payout: payout.clone() }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─── Recent Earnings ───
+            div { class: "bg-gray-800 border border-gray-700 rounded-lg p-6",
+                h3 { class: "text-white font-bold text-lg mb-4", "💰 Recent Earnings" }
+
+                if commissions_list.is_empty() {
+                    EmptyState {
+                        icon: "💰".to_string(),
+                        title: "No earnings yet".to_string(),
+                        message: "Fulfill tours and convert owners to start earning.".to_string(),
                     }
                 } else {
                     div { class: "space-y-3",
-                        for payout in payout_history.read().iter() {
-                            PayoutHistoryRow { payout: payout.clone() }
+                        for comm in commissions_list.iter() {
+                            EarningRow { commission: comm.clone() }
                         }
                     }
-                }
-            }
-
-            // Request Payout Modal
-            if *show_request_modal.read() {
-                RequestPayoutModal {
-                    available_balance: balance,
-                    token: token.clone(),
-                    on_close: move |_| show_request_modal.set(false),
-                    on_success: move |msg: String| {
-                        show_request_modal.set(false);
-                        message.set(Some(msg));
-                        is_error.set(false);
-                        fetch_trigger += 1;
-                    },
                 }
             }
         }
     }
 }
 
-// ───────────────────────────────────────────
+// ═══════════════════════════════════════════
+// Wallet Card
+// ═══════════════════════════════════════════
+#[component]
+fn WalletCard(icon: String, label: String, value: String, color: String) -> Element {
+    let border_color = match color.as_str() {
+        "green" => "border-green-500/30",
+        "blue" => "border-blue-500/30",
+        "yellow" => "border-yellow-500/30",
+        "purple" => "border-purple-500/30",
+        _ => "border-gray-500/30",
+    };
+
+    rsx! {
+        div { class: "bg-gray-800 border {border_color} rounded-lg p-5",
+            div { class: "flex items-center gap-3",
+                span { class: "text-3xl", "{icon}" }
+                div {
+                    p { class: "text-gray-400 text-sm", "{label}" }
+                    p { class: "text-white text-xl font-bold", "{value}" }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════
 // Payout History Row
-// ───────────────────────────────────────────
+// ═══════════════════════════════════════════
 #[component]
-fn PayoutHistoryRow(payout: serde_json::Value) -> Element {
+fn PayoutRow(payout: serde_json::Value) -> Element {
     let amount = payout.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let status = payout.get("status").and_then(|v| v.as_str()).unwrap_or("—");
-    let phone = payout.get("mpesa_phone").and_then(|v| v.as_str()).unwrap_or("—");
-    let created_at = payout.get("created_at").and_then(|v| v.as_str()).unwrap_or("—");
-    let processed_at = payout.get("processed_at").and_then(|v| v.as_str());
-    let admin_notes = payout.get("admin_notes").and_then(|v| v.as_str());
+    let phone = payout.get("mpesa_phone").and_then(|v| v.as_str()).unwrap_or("");
+    let status = payout.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+    let created_at = payout.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
 
-    let date_display = if created_at.len() > 10 { &created_at[..10] } else { created_at };
-    let processed_display = processed_at
-        .map(|d| if d.len() > 10 { &d[..10] } else { d })
-        .unwrap_or("—");
-
-    let (status_badge, status_text, row_border) = match status {
-        "pending" => (
-            "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-            "⏳ Pending Review",
-            "border-yellow-500/20",
-        ),
-        "approved" => (
-            "bg-green-500/10 text-green-400 border-green-500/20",
-            "✅ Approved & Sent",
-            "border-green-500/20",
-        ),
-        "rejected" => (
-            "bg-red-500/10 text-red-400 border-red-500/20",
-            "❌ Rejected (Refunded)",
-            "border-red-500/20",
-        ),
-        _ => (
-            "bg-gray-500/10 text-gray-400 border-gray-500/20",
-            "Unknown",
-            "border-gray-700",
-        ),
+    let (status_color, status_icon) = match status {
+        "pending" => ("bg-yellow-500/20 text-yellow-400 border-yellow-500/30", "⏳"),
+        "approved" => ("bg-green-500/20 text-green-400 border-green-500/30", "✅"),
+        "rejected" => ("bg-red-500/20 text-red-400 border-red-500/30", "❌"),
+        _ => ("bg-gray-500/20 text-gray-400 border-gray-500/30", "📋"),
     };
 
+    // Show only first 16 chars of timestamp for readability
+    let date_display: String = created_at.chars().take(16).collect();
+
     rsx! {
-        div { class: "bg-gray-900 rounded-lg border {row_border} p-4",
-            div { class: "flex items-start justify-between gap-4",
-                div { class: "flex-1",
-                    div { class: "flex items-center gap-3 mb-2",
-                        p { class: "text-xl font-bold text-white", "KES {amount as i32}" }
-                        span { class: "px-2 py-0.5 rounded-full text-xs border {status_badge}",
-                            "{status_text}"
-                        }
-                    }
-                    div { class: "flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400",
-                        span { "📱 {phone}" }
-                        span { "📅 Requested: {date_display}" }
-                        span { "✓ Processed: {processed_display}" }
-                    }
-                    if let Some(notes) = admin_notes {
-                        if !notes.is_empty() {
-                            p { class: "text-gray-500 text-xs mt-2 italic", "💬 {notes}" }
-                        }
-                    }
+        tr { class: "hover:bg-gray-700/50",
+            td { class: "px-4 py-3 text-white font-semibold", "KES {amount:.2}" }
+            td { class: "px-4 py-3 text-gray-400", "{phone}" }
+            td { class: "px-4 py-3",
+                span { class: "px-2 py-1 rounded-full text-xs border {status_color}",
+                    "{status_icon} {status}"
                 }
             }
+            td { class: "px-4 py-3 text-gray-400 text-sm", "{date_display}" }
         }
     }
 }
 
-// ───────────────────────────────────────────
-// Request Payout Modal
-// ───────────────────────────────────────────
+// ═══════════════════════════════════════════
+// Recent Earnings Row
+// ═══════════════════════════════════════════
 #[component]
-fn RequestPayoutModal(
-    available_balance: f64,
-    token: String,
-    on_close: EventHandler<()>,
-    on_success: EventHandler<String>,
-) -> Element {
-    let mut amount = use_signal(|| String::new());
-    let mut phone_number = use_signal(|| String::new());
-    let mut loading = use_signal(|| false);
-    let mut error_message = use_signal(|| Option::<String>::None);
+fn EarningRow(commission: serde_json::Value) -> Element {
+    let amount = commission.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let comm_type = commission.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let created_at = commission.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
 
-    let is_valid_phone = {
-        let phone = phone_number.read().clone();
-        let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
-        (digits.starts_with("254") && digits.len() == 12)
-            || (digits.starts_with("0") && digits.len() == 10)
-            || (digits.starts_with("7") && digits.len() == 9)
+    let (label, icon) = match comm_type {
+        "tour_fee" => ("Virtual Tour Fee", "🎬"),
+        "handshake_30pct" => ("Registration Fee Commission (30%)", "🤝"),
+        "subscription_10pct" => ("Subscription Commission (10%)", "⭐"),
+        "referral_bonus" => ("Referral Bonus", "🏆"),
+        _ => (comm_type, "💰"),
     };
 
-    let amount_value = amount.read().parse::<f64>().unwrap_or(0.0);
-    let is_valid_amount = amount_value >= 500.0 && amount_value <= available_balance;
-
-    let token_for_submit = token.clone();
-    let handle_submit = move |_| {
-        if !is_valid_amount {
-            error_message.set(Some("Amount must be between KES 500 and your available balance".to_string()));
-            return;
-        }
-        if !is_valid_phone {
-            error_message.set(Some("Invalid M-Pesa phone number".to_string()));
-            return;
-        }
-
-        loading.set(true);
-        error_message.set(None);
-
-        let t = token_for_submit.clone();
-        let amt = amount_value;
-        let phone = phone_number.read().clone();
-        let success_handler = on_success.clone();
-
-        spawn(async move {
-            match request_payout(&t, amt, &phone).await {
-                Ok(result) => {
-                    let msg = result.get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Payout request submitted");
-                    success_handler.call(format!("✅ {}", msg));
-                }
-                Err(e) => {
-                    error_message.set(Some(format!("Failed: {}", e)));
-                    loading.set(false);
-                }
-            }
-        });
-    };
+    let date_display: String = created_at.chars().take(16).collect();
 
     rsx! {
-        div { class: "fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4",
-            div { class: "bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-md w-full",
-                div { class: "flex items-center justify-between mb-4",
-                    h3 { class: "text-xl font-bold text-white", "Request Payout" }
-                    button {
-                        class: "text-gray-400 hover:text-white text-2xl leading-none",
-                        onclick: move |_| on_close.call(()),
-                        "×"
-                    }
-                }
-
-                div { class: "bg-green-900/20 border border-green-500/30 rounded-lg p-4 mb-4",
-                    p { class: "text-green-400 text-sm", "Available Balance" }
-                    p { class: "text-2xl font-bold text-white", "KES {available_balance as i32}" }
-                }
-
-                div { class: "space-y-4",
-                    div {
-                        label { class: "block text-sm font-medium text-gray-400 mb-1", "Amount (KES)" }
-                        input {
-                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
-                            r#type: "number",
-                            placeholder: "500",
-                            min: "500",
-                            max: "{available_balance as i32}",
-                            value: "{amount}",
-                            oninput: move |evt| {
-                                amount.set(evt.value());
-                                error_message.set(None);
-                            },
-                        }
-                        p { class: "text-gray-500 text-xs mt-1",
-                            "Minimum: KES 500 • Maximum: KES {available_balance as i32}"
-                        }
-                    }
-
-                    div {
-                        label { class: "block text-sm font-medium text-gray-400 mb-1", "M-Pesa Phone Number" }
-                        input {
-                            class: "w-full px-4 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white",
-                            r#type: "tel",
-                            placeholder: "254712345678",
-                            value: "{phone_number}",
-                            oninput: move |evt| {
-                                phone_number.set(evt.value());
-                                error_message.set(None);
-                            },
-                        }
-                        p { class: "text-gray-500 text-xs mt-1", "Funds will be sent to this number" }
-                    }
-
-                    if let Some(err) = error_message.read().as_ref() {
-                        div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-3",
-                            p { class: "text-red-400 text-sm", "❌ {err}" }
-                        }
-                    }
-
-                    div { class: "flex gap-2 pt-4 border-t border-gray-700",
-                        button {
-                            class: "flex-1 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium",
-                            onclick: move |_| on_close.call(()),
-                            "Cancel"
-                        }
-                        button {
-                            class: "flex-1 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium disabled:opacity-50",
-                            disabled: *loading.read() || !is_valid_amount || !is_valid_phone,
-                            onclick: handle_submit,
-                            if *loading.read() { "Submitting..." } else { "Submit Request" }
-                        }
-                    }
+        div { class: "flex items-center justify-between p-3 bg-gray-700/30 rounded-lg",
+            div { class: "flex items-center gap-3",
+                span { class: "text-2xl", "{icon}" }
+                div {
+                    p { class: "text-white text-sm font-medium", "{label}" }
+                    p { class: "text-gray-500 text-xs", "{date_display}" }
                 }
             }
+            span { class: "text-green-400 font-bold", "+KES {amount:.2}" }
         }
     }
 }

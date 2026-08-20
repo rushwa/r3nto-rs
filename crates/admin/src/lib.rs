@@ -34,6 +34,7 @@ use crate::pages::owner_inquiries::OwnerInquiriesPage;
 use crate::pages::agent_performance::AgentPerformancePage;
 use crate::pages::agent_referrals::AgentReferralsPage;
 use crate::pages::agent_tour_studio::AgentTourStudioPage;
+use crate::pages::tour_oversight::TourOversightPage;
 
 #[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
@@ -90,6 +91,8 @@ pub enum AdminRoute {
         ConversionPage,
         #[route("/payouts")]
         PayoutsPage,
+        #[route("/admin/tours")]
+        TourOversightPage {},
     #[end_layout]
 
     #[route("/:..segments")]
@@ -141,9 +144,6 @@ fn AdminLayout() -> Element {
     }
 }
 
-// ───────────────────────────────────────────
-// Property Owner Sidebar
-// ───────────────────────────────────────────
 // ───────────────────────────────────────────
 // Property Owner Sidebar
 // ───────────────────────────────────────────

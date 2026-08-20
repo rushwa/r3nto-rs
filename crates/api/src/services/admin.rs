@@ -790,32 +790,88 @@ pub async fn grant_admin_privileges(db: &rento_core::Database, user_id: &str, gr
         .execute(pool(db)).await?;
     Ok(())
 }
-pub async fn update_user_role(db: &rento_core::Database, user_id: &str, role: &str, is_superuser: bool, is_staff: bool) -> ApiResult<()> {
-    let id = Uuid::parse_str(user_id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+// ───────────────────────────────────────────
+// Full User Role Management
+// ───────────────────────────────────────────
+pub async fn update_user_role(
+    db: &rento_core::Database,
+    user_id: &Uuid,
+    role: Option<&str>,
+    is_staff: Option<bool>,
+    is_superuser: Option<bool>,
+) -> ApiResult<serde_json::Value> {
+    // Fetch current user to know what to change
+    let current: (String, bool, bool, bool) = sqlx::query_as(
+        "SELECT role::text, is_staff, is_superuser, is_active FROM account_users WHERE id = $1"
+    )
+        .bind(user_id)
+        .fetch_optional(pool(db))
+        .await?
+        .ok_or_else(|| ApiError::NotFound("User not found".into()))?;
 
-    // If making this user a superuser, check no other superuser exists
-    if is_superuser {
-        let existing_superuser: Option<(String,)> = sqlx::query_as(
-            "SELECT id::text FROM account_users WHERE is_superuser = true AND id != $1 LIMIT 1"
+    let (current_role, current_is_staff, current_is_superuser, _is_active) = current;
+
+    // Determine new values
+    let new_role = role.unwrap_or(&current_role);
+    let new_is_staff = is_staff.unwrap_or(current_is_staff);
+    let new_is_superuser = is_superuser.unwrap_or(current_is_superuser);
+
+    // Validate role
+    let valid_roles = ["CLIENT", "AGENT", "PROPERTY_OWNER", "ADMIN", "SUPERUSER"];
+    let role_upper = new_role.to_uppercase();
+    if !valid_roles.contains(&role_upper.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "Invalid role '{}'. Must be one of: {}",
+            new_role, valid_roles.join(", ")
+        )));
+    }
+
+    // Prevent removing the last superuser
+    if current_is_superuser && !new_is_superuser {
+        let other_superusers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM account_users WHERE is_superuser = true AND id != $1"
         )
-            .bind(id)
-            .fetch_optional(pool(db)).await?;
+            .bind(user_id)
+            .fetch_one(pool(db))
+            .await?;
 
-        if existing_superuser.is_some() {
-            return Err(ApiError::BadRequest("A superuser already exists. Demote the current superuser first.".to_string()));
+        if other_superusers == 0 {
+            return Err(ApiError::BadRequest(
+                "Cannot remove superuser status from the only superuser".into()
+            ));
         }
     }
 
+    // Update the user
     sqlx::query(
-        "UPDATE account_users SET is_superuser = $1, is_staff = $2, role = $3::text::user_role, updated_at = NOW() WHERE id = $4"
+        "UPDATE account_users SET role = $1::text::user_role, is_staff = $2, is_superuser = $3, updated_at = NOW() WHERE id = $4"
     )
-        .bind(is_superuser)
-        .bind(is_staff)
-        .bind(role)
-        .bind(id)
-        .execute(pool(db)).await?;
-    Ok(())
+        .bind(&role_upper)
+        .bind(new_is_staff)
+        .bind(new_is_superuser)
+        .bind(user_id)
+        .execute(pool(db))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to update user role: {}", e)))?;
+
+    // If becoming an agent, create their wallet
+    if role_upper == "AGENT" && current_role.to_uppercase() != "AGENT" {
+        let _ = crate::services::wallet::get_or_create_wallet(pool(db), user_id).await;
+        tracing::info!("💼 Created wallet for new agent {}", user_id);
+    }
+
+    tracing::info!(
+        "🔐 User {} role updated: role={}, is_staff={}, is_superuser={}",
+        user_id, role_upper, new_is_staff, new_is_superuser
+    );
+
+    Ok(serde_json::json!({
+        "message": "User role updated successfully",
+        "user_id": user_id.to_string(),
+        "role": role_upper,
+        "is_staff": new_is_staff,
+        "is_superuser": new_is_superuser,
+    }))
 }
 pub async fn create_user(db: &rento_core::Database, req: &CreateUserRequest) -> ApiResult<()> {
     use argon2::{
@@ -1971,13 +2027,13 @@ pub async fn update_lead_stage(
 
 // ═══════════════════════════════════════════
 // FEATURE 2: AGENT PERFORMANCE DASHBOARD
+// ✅ UPDATED: Includes virtual tour fee earnings
 // ═══════════════════════════════════════════
-
 pub async fn get_agent_performance(
     db: &rento_core::Database,
     agent_id: &Uuid,
 ) -> ApiResult<serde_json::Value> {
-    // Total leads claimed by this agent
+    // ─── LEADS ───
     let total_leads: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1"
     )
@@ -1985,7 +2041,6 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Converted leads (closed stage)
     let converted_leads: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1 AND pipeline_stage = 'closed'"
     )
@@ -1993,7 +2048,6 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Active leads (not closed/lost)
     let active_leads: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_leads WHERE claimed_by = $1 AND pipeline_stage NOT IN ('closed', 'lost')"
     )
@@ -2001,17 +2055,16 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Conversion rate
     let conversion_rate = if total_leads > 0 {
         (converted_leads as f64 / total_leads as f64) * 100.0
     } else {
         0.0
     };
 
-    // Wallet info
+    // ─── WALLET (includes ALL earnings: handshake + subscription + tour fees + bonuses) ───
     let wallet = crate::services::wallet::get_or_create_wallet(pool(db), agent_id).await?;
 
-    // Commissions this month
+    // ─── COMMISSIONS THIS MONTH ───
     let commissions_this_month: f64 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(SUM(commission_amount)::float8, 0)
@@ -2025,7 +2078,6 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Commissions count this month
     let commissions_count_month: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM commission_ledger
@@ -2038,7 +2090,7 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Properties managed (through converted owners)
+    // ─── PROPERTIES & CONVERSIONS ───
     let properties_managed: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT p.id)
@@ -2051,7 +2103,6 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Property owners converted
     let owners_converted: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_conversions WHERE agent_id = $1"
     )
@@ -2059,7 +2110,7 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Referrals brought in
+    // ─── REFERRALS ───
     let referrals_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1"
     )
@@ -2067,7 +2118,6 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Successful referrals (signed up)
     let referrals_completed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_referrals WHERE agent_id = $1 AND signup_completed = TRUE"
     )
@@ -2075,7 +2125,112 @@ pub async fn get_agent_performance(
         .fetch_one(pool(db))
         .await?;
 
-    // Last 7 days activity (daily commissions)
+    // ═══════════════════════════════════════════
+    // ✅ NEW: VIRTUAL TOUR FEE EARNINGS
+    // ═══════════════════════════════════════════
+
+    // Tour fee earnings from commission_ledger
+    let tour_stats: Option<(i64, f64)> = sqlx::query_as(
+        r#"
+        SELECT COUNT(*), COALESCE(SUM(commission_amount)::float8, 0)
+        FROM commission_ledger
+        WHERE agent_id = $1 AND commission_type = 'tour_fee' AND status = 'credited'
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await
+        .ok();
+
+    let (tours_completed, tour_fee_total) = tour_stats.unwrap_or((0, 0.0));
+
+    // Tour fee earnings THIS MONTH
+    let tour_fees_this_month: f64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(commission_amount)::float8, 0)
+        FROM commission_ledger
+        WHERE agent_id = $1
+          AND commission_type = 'tour_fee'
+          AND status = 'credited'
+          AND created_at >= date_trunc('month', NOW())
+        "#
+    )
+        .bind(agent_id)
+        .fetch_one(pool(db))
+        .await
+        .unwrap_or(0.0);
+
+    // ─── SLA PERFORMANCE ───
+    let sla_metrics: Option<(i32, i32, i32, i32, i32)> = sqlx::query_as(
+        r#"
+        SELECT
+            total_tours_assigned,
+            tours_fulfilled_on_time,
+            tours_fulfilled_late,
+            tours_expired,
+            average_fulfillment_minutes
+        FROM agent_sla_metrics
+        WHERE agent_id = $1
+        "#
+    )
+        .bind(agent_id)
+        .fetch_optional(pool(db))
+        .await?;
+
+    let (tours_assigned, tours_on_time, tours_late, tours_expired, avg_fulfillment_mins) =
+        sla_metrics.unwrap_or((0, 0, 0, 0, 0));
+
+    let total_fulfilled = tours_on_time + tours_late;
+    let on_time_rate = if total_fulfilled > 0 {
+        (tours_on_time as f64 / total_fulfilled as f64 * 100.0).round() as i32
+    } else {
+        0
+    };
+
+    // ═══════════════════════════════════════════
+    // ✅ NEW: EARNINGS BREAKDOWN BY TYPE
+    // ═══════════════════════════════════════════
+    let breakdown_rows: Vec<(String, f64, i64)> = sqlx::query_as(
+        r#"
+        SELECT
+            commission_type,
+            COALESCE(SUM(commission_amount)::float8, 0) as total,
+            COUNT(*) as count
+        FROM commission_ledger
+        WHERE agent_id = $1 AND status = 'credited'
+        GROUP BY commission_type
+        ORDER BY total DESC
+        "#
+    )
+        .bind(agent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let earnings_breakdown: Vec<serde_json::Value> = breakdown_rows.iter().map(|(ctype, total, count)| {
+        let label = match ctype.as_str() {
+            "handshake_30pct" => "Registration Fee Commission (30%)",
+            "subscription_10pct" => "Subscription Commission (10%)",
+            "tour_fee" => "Virtual Tour Fee (KES 20/tour)",
+            "referral_bonus" => "Referral Bonus",
+            other => other,
+        };
+        let icon = match ctype.as_str() {
+            "handshake_30pct" => "🤝",
+            "subscription_10pct" => "⭐",
+            "tour_fee" => "🎬",
+            "referral_bonus" => "🏆",
+            _ => "💰",
+        };
+        serde_json::json!({
+            "type": ctype,
+            "label": label,
+            "icon": icon,
+            "total": total,
+            "count": count,
+        })
+    }).collect();
+
+    // ─── DAILY ACTIVITY (last 7 days) ───
     let daily_activity = sqlx::query(
         r#"
         SELECT
@@ -2101,21 +2256,58 @@ pub async fn get_agent_performance(
         })
     }).collect();
 
+    // ─── PAYOUT ELIGIBILITY ───
+    let can_request_payout = wallet.balance >= MINIMUM_PAYOUT_AMOUNT;
+
     Ok(serde_json::json!({
+        // Leads
         "total_leads": total_leads,
         "converted_leads": converted_leads,
         "active_leads": active_leads,
         "conversion_rate": conversion_rate,
+
+        // Wallet (includes ALL earnings: handshake + subscription + tour fees + bonuses)
         "total_earned": wallet.total_earned,
         "current_balance": wallet.balance,
         "pending_balance": wallet.pending_balance,
         "total_withdrawn": wallet.total_withdrawn,
+        "can_request_payout": can_request_payout,
+        "minimum_payout": MINIMUM_PAYOUT_AMOUNT,
+
+        // Commissions this month
         "commissions_this_month": commissions_this_month,
         "commissions_count_month": commissions_count_month,
+
+        // Properties & conversions
         "properties_managed": properties_managed,
         "owners_converted": owners_converted,
+
+        // Referrals
         "referrals_count": referrals_count,
         "referrals_completed": referrals_completed,
+
+        // ✅ NEW: Virtual Tour Earnings
+        "tour_fee_earnings": {
+            "tours_completed": tours_completed,
+            "total_earned": tour_fee_total,
+            "fee_per_tour": TOUR_FEE_KES,
+            "this_month": tour_fees_this_month,
+        },
+
+        // ✅ NEW: SLA Performance
+        "sla_performance": {
+            "total_assigned": tours_assigned,
+            "on_time": tours_on_time,
+            "late": tours_late,
+            "expired": tours_expired,
+            "on_time_rate_percent": on_time_rate,
+            "avg_fulfillment_minutes": avg_fulfillment_mins,
+        },
+
+        // ✅ NEW: Earnings breakdown by type
+        "earnings_breakdown": earnings_breakdown,
+
+        // Daily activity
         "daily_activity": daily_data,
     }))
 }
@@ -2886,10 +3078,27 @@ pub async fn confirm_tour_payment(
 // 3. Agent Uploads Native-Recorded Video
 // ✅ MILESTONE 6: Auto-generates viewing link + sends email to client
 // ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 3. Agent Uploads Native-Recorded Video
+// ✅ MILESTONE 7: Wallet credit + Email + Auto viewing link
+// ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 3. Agent Uploads Native-Recorded Video
+// ✅ FIXED: Now credits KES 20 tour fee to agent wallet
+// ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 3. Agent Uploads Native-Recorded Video
+// ✅ MILESTONE 7: Wallet credit + Email + Auto viewing link
+// ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 3. Agent Uploads Native-Recorded Video
+// ✅ MILESTONE 6: Auto viewing link + email client
+// ✅ MILESTONE 7: Credit KES 20 tour fee to agent wallet
+// ───────────────────────────────────────────
 pub async fn upload_tour_video(
     db: &rento_core::Database,
-    email_service: &rento_core::email::EmailService,  // ✅ NEW
-    viewing_link_base: &str,  // ✅ NEW (e.g., "http://localhost:3001")
+    email_service: &rento_core::email::EmailService,
+    viewing_link_base: &str,
     agent_id: &Uuid,
     req: &UploadTourVideoRequest,
 ) -> ApiResult<serde_json::Value> {
@@ -2961,8 +3170,81 @@ pub async fn upload_tour_video(
     // Update agent SLA metrics
     update_agent_sla_on_fulfill(db, agent_id, tour_id).await?;
 
-    // ✅ AUTO-GENERATE viewing link + EMAIL CLIENT
-    // Types: (client_email, client_name, property_title, video_url)
+    // ═══════════════════════════════════════════
+    // ✅ MILESTONE 7: CREDIT KES 20 TOUR FEE TO AGENT WALLET
+    // ═══════════════════════════════════════════
+    let mut wallet_credited = false;
+    let mut new_balance = 0.0_f64;
+
+    match crate::services::wallet::get_or_create_wallet(pool(db), agent_id).await {
+        Ok(_) => {
+            let mut tx = pool(db).begin().await?;
+
+            // Create ledger entry for the tour fee
+            let ledger_id: Uuid = sqlx::query_scalar(
+                r#"
+                INSERT INTO commission_ledger
+                    (agent_id, payment_id, property_owner_id, property_id,
+                     commission_type, gross_amount, commission_rate, commission_amount,
+                     status, credited_at)
+                VALUES ($1, NULL, NULL, $2, 'tour_fee', $3, 100.0, $3, 'credited', NOW())
+                RETURNING id
+                "#
+            )
+                .bind(agent_id)
+                .bind(property_id)
+                .bind(TOUR_FEE_KES)
+                .fetch_one(&mut *tx)
+                .await?;
+
+            // Credit the wallet (updates balance AND total_earned)
+            crate::services::wallet::credit_wallet(
+                &mut tx,
+                agent_id,
+                TOUR_FEE_KES,
+                &ledger_id.to_string(),
+                &format!("🎬 Tour fee KES {:.2} for fulfilling tour {}", TOUR_FEE_KES, &tour_id.to_string()[..8]),
+            ).await?;
+
+            tx.commit().await?;
+            wallet_credited = true;
+
+            // Get updated balance
+            if let Ok(wallet) = crate::services::wallet::get_or_create_wallet(pool(db), agent_id).await {
+                new_balance = wallet.balance;
+            }
+
+            // Send commission email to agent
+            let agent_email: Option<String> = sqlx::query_scalar(
+                "SELECT email FROM account_users WHERE id = $1"
+            )
+                .bind(agent_id)
+                .fetch_optional(pool(db))
+                .await
+                .unwrap_or(None);
+
+            if let Some(email) = agent_email {
+                let _ = email_service.send_commission_notification(
+                    &email,
+                    TOUR_FEE_KES,
+                    TOUR_FEE_KES,
+                    "tour_fee",
+                ).await.map_err(|e| tracing::warn!("Failed to send tour fee email to agent: {}", e));
+            }
+
+            tracing::info!(
+                "💰 Agent {} credited KES {:.2} for tour fulfillment (new balance: KES {:.2})",
+                agent_id, TOUR_FEE_KES, new_balance
+            );
+        }
+        Err(e) => {
+            tracing::warn!("⚠️ Failed to credit tour fee to agent wallet: {}", e);
+        }
+    }
+
+    // ═══════════════════════════════════════════
+    // ✅ MILESTONE 6: AUTO-GENERATE VIEWING LINK + EMAIL CLIENT
+    // ═══════════════════════════════════════════
     let tour_details: Option<(String, Option<String>, String, String)> = sqlx::query_as(
         r#"
         SELECT tr.client_email, tr.client_name, p.title, v.video_url
@@ -2981,7 +3263,7 @@ pub async fn upload_tour_video(
     let mut generated_viewing_url: Option<String> = None;
 
     if let Some((client_email, client_name, property_title, _video_url)) = tour_details {
-        // Generate viewing link automatically (no client_id since this is agent-initiated)
+        // Generate viewing link automatically
         let viewing_result = generate_viewing_link(db, &tour_id.to_string(), None).await;
 
         if let Ok(viewing_data) = viewing_result {
@@ -2994,10 +3276,10 @@ pub async fn upload_tour_video(
 
             generated_viewing_url = Some(format!("{}{}", viewing_link_base, viewing_url));
 
-            // ✅ SEND "Tour Ready" email to client
+            // Send "Tour Ready" email to client
             let _ = email_service.send_tour_fulfilled(
                 &client_email,
-                client_name.as_deref(),   // Option<String> -> Option<&str>
+                client_name.as_deref(),
                 &property_title,
                 viewing_url,
                 expires_at,
@@ -3024,6 +3306,13 @@ pub async fn upload_tour_video(
             "logo": "R3NTO",
         },
         "client_notified": generated_viewing_url.is_some(),
+        "wallet": {
+            "credited": wallet_credited,
+            "amount": TOUR_FEE_KES,
+            "new_balance": new_balance,
+            "can_request_payout": new_balance >= MINIMUM_PAYOUT_AMOUNT,
+            "minimum_payout": MINIMUM_PAYOUT_AMOUNT,
+        }
     }))
 }
 // ───────────────────────────────────────────
@@ -3419,6 +3708,10 @@ pub async fn get_agent_pending_tours(
 // ───────────────────────────────────────────
 // 8. Agent Tour History (all statuses)
 // ───────────────────────────────────────────
+// ───────────────────────────────────────────
+// 8. Agent Tour History (all statuses)
+// ✅ NEW: Includes viewing-link expiry status
+// ───────────────────────────────────────────
 pub async fn get_agent_tour_history(
     db: &rento_core::Database,
     agent_id: &Uuid,
@@ -3444,10 +3737,26 @@ pub async fn get_agent_tour_history(
                 WHEN tr.fulfilled_at IS NOT NULL AND tr.fulfilled_at <= tr.sla_deadline THEN TRUE
                 WHEN tr.fulfilled_at IS NOT NULL THEN FALSE
                 ELSE NULL
-            END as met_sla
+            END as met_sla,
+            -- ✅ NEW: Viewing session info (latest session per tour)
+            vs.viewing_started_at,
+            vs.viewing_expires_at,
+            CASE
+                WHEN vs.id IS NULL THEN 'not_generated'
+                WHEN vs.viewing_expires_at <= NOW() THEN 'expired'
+                WHEN vs.viewing_started_at IS NULL THEN 'awaiting_client'
+                ELSE 'active'
+            END as viewing_status
         FROM virtual_tour_requests tr
         JOIN properties p ON tr.property_id = p.id
         LEFT JOIN virtual_tour_videos v ON v.tour_request_id = tr.id
+        LEFT JOIN LATERAL (
+            SELECT id, viewing_started_at, viewing_expires_at
+            FROM tour_viewing_sessions
+            WHERE tour_request_id = tr.id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) vs ON true
         WHERE tr.assigned_agent_id = $1
         "#
     );
@@ -3472,6 +3781,7 @@ pub async fn get_agent_tour_history(
     let rows = q.fetch_all(pool(db)).await?;
 
     let history: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
         serde_json::json!({
             "id": row.try_get::<String, _>("id").unwrap_or_default(),
             "client_name": row.try_get::<Option<String>, _>("client_name").ok().flatten(),
@@ -3487,6 +3797,11 @@ pub async fn get_agent_tour_history(
             "video_url": row.try_get::<Option<String>, _>("video_url").ok().flatten(),
             "duration_seconds": row.try_get::<Option<i32>, _>("duration_seconds").ok().flatten(),
             "met_sla": row.try_get::<Option<bool>, _>("met_sla").ok().flatten(),
+            // ✅ NEW: Viewing link fields
+            "viewing_status": row.try_get::<String, _>("viewing_status")
+                .unwrap_or_else(|_| "not_generated".to_string()),
+            "viewing_expires_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("viewing_expires_at")
+                .ok().flatten().map(|d| d.to_rfc3339()),
         })
     }).collect();
 
@@ -3795,4 +4110,157 @@ pub async fn get_client_tours(
     }).collect();
 
     Ok(tours)
+}
+
+// ═══════════════════════════════════════════
+// ADMIN TOUR OVERSIGHT — Full lifecycle visibility
+// ═══════════════════════════════════════════
+pub async fn get_all_tours_admin(
+    db: &rento_core::Database,
+    status_filter: Option<&str>,
+    limit: Option<i64>,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let mut query = String::from(
+        r#"
+        SELECT
+            tr.id::text as tour_id,
+            tr.client_email,
+            tr.client_name,
+            tr.client_phone,
+            tr.status,
+            tr.fee_amount::TEXT as fee_amount,
+            tr.fee_paid,
+            tr.payment_reference,
+            tr.created_at as requested_at,
+            tr.fulfilled_at,
+            tr.sla_deadline,
+            -- Property info
+            p.id::text as property_id,
+            p.title as property_title,
+            p.location as property_location,
+            -- Agent info
+            COALESCE(NULLIF(ag.first_name || ' ' || ag.last_name, ' '), ag.username) as agent_name,
+            ag.email as agent_email,
+            -- Video info
+            v.id::text as video_id,
+            v.video_url,
+            v.duration_seconds,
+            v.created_at as video_uploaded_at,
+            -- Viewing sessions
+            (SELECT COUNT(*) FROM tour_viewing_sessions vs WHERE vs.tour_request_id = tr.id) as viewing_sessions_count,
+            -- SLA calculation
+            CASE
+                WHEN tr.fulfilled_at IS NOT NULL AND tr.fulfilled_at <= tr.sla_deadline THEN 'on_time'
+                WHEN tr.fulfilled_at IS NOT NULL THEN 'late'
+                WHEN tr.status = 'expired' THEN 'expired'
+                WHEN NOW() > tr.sla_deadline AND tr.status = 'pending' THEN 'overdue'
+                ELSE 'within_sla'
+            END as sla_status,
+            -- Time to fulfill (in minutes)
+            CASE
+                WHEN tr.fulfilled_at IS NOT NULL THEN
+                    EXTRACT(EPOCH FROM (tr.fulfilled_at - tr.created_at))::int / 60
+                ELSE NULL
+            END as fulfillment_minutes
+        FROM virtual_tour_requests tr
+        JOIN properties p ON tr.property_id = p.id
+        LEFT JOIN account_users ag ON tr.assigned_agent_id = ag.id
+        LEFT JOIN virtual_tour_videos v ON v.tour_request_id = tr.id
+        WHERE 1=1
+        "#
+    );
+
+    let mut param_idx = 1;
+    if let Some(status) = status_filter {
+        query.push_str(&format!(" AND tr.status = ${}", param_idx));
+        param_idx += 1;
+    }
+
+    query.push_str(" ORDER BY tr.created_at DESC");
+
+    if let Some(lim) = limit {
+        query.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    let mut q = sqlx::query(&query);
+    if let Some(status) = status_filter {
+        q = q.bind(status);
+    }
+
+    let rows = q.fetch_all(pool(db)).await?;
+
+    let tours: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "tour_id": row.try_get::<String, _>("tour_id").unwrap_or_default(),
+            "client_email": row.try_get::<String, _>("client_email").unwrap_or_default(),
+            "client_name": row.try_get::<Option<String>, _>("client_name").ok().flatten(),
+            "client_phone": row.try_get::<Option<String>, _>("client_phone").ok().flatten(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "fee_amount": row.try_get::<String, _>("fee_amount").unwrap_or_else(|_| "20.00".to_string()),
+            "fee_paid": row.try_get::<bool, _>("fee_paid").unwrap_or(false),
+            "payment_reference": row.try_get::<Option<String>, _>("payment_reference").ok().flatten(),
+            "requested_at": row.try_get::<chrono::DateTime<chrono::Utc>, _>("requested_at")
+                .map(|d| d.to_rfc3339()).unwrap_or_default(),
+            "fulfilled_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("fulfilled_at")
+                .ok().flatten().map(|d| d.to_rfc3339()),
+            "sla_deadline": row.try_get::<chrono::DateTime<chrono::Utc>, _>("sla_deadline")
+                .map(|d| d.to_rfc3339()).unwrap_or_default(),
+            "property_id": row.try_get::<String, _>("property_id").unwrap_or_default(),
+            "property_title": row.try_get::<String, _>("property_title").unwrap_or_default(),
+            "property_location": row.try_get::<Option<String>, _>("property_location").ok().flatten(),
+            "agent_name": row.try_get::<Option<String>, _>("agent_name").ok().flatten(),
+            "agent_email": row.try_get::<Option<String>, _>("agent_email").ok().flatten(),
+            "video_id": row.try_get::<Option<String>, _>("video_id").ok().flatten(),
+            "video_url": row.try_get::<Option<String>, _>("video_url").ok().flatten(),
+            "duration_seconds": row.try_get::<Option<i32>, _>("duration_seconds").ok().flatten(),
+            "video_uploaded_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("video_uploaded_at")
+                .ok().flatten().map(|d| d.to_rfc3339()),
+            "viewing_sessions_count": row.try_get::<i64, _>("viewing_sessions_count").unwrap_or(0),
+            "sla_status": row.try_get::<String, _>("sla_status").unwrap_or_default(),
+            "fulfillment_minutes": row.try_get::<Option<i32>, _>("fulfillment_minutes").ok().flatten(),
+        })
+    }).collect();
+
+    Ok(tours)
+}
+
+// Admin tour stats summary
+pub async fn get_tour_stats_admin(
+    db: &rento_core::Database,
+) -> ApiResult<serde_json::Value> {
+    let stats: (i64, i64, i64, i64, i64, Option<f64>) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE status = 'pending') as pending,
+            COUNT(*) FILTER (WHERE status = 'fulfilled') as fulfilled,
+            COUNT(*) FILTER (WHERE status = 'expired') as expired,
+            COUNT(*) FILTER (WHERE status = 'property_delisted') as delisted,
+            COALESCE(SUM(fee_amount) FILTER (WHERE status = 'fulfilled'), 0)::float8 as total_revenue
+        FROM virtual_tour_requests
+        "#
+    )
+        .fetch_one(pool(db))
+        .await?;
+
+    let avg_fulfillment: Option<f64> = sqlx::query_scalar(
+        r#"
+        SELECT AVG(EXTRACT(EPOCH FROM (fulfilled_at - created_at)) / 3600.0)
+        FROM virtual_tour_requests
+        WHERE fulfilled_at IS NOT NULL
+        "#
+    )
+        .fetch_optional(pool(db))
+        .await?;
+
+    Ok(serde_json::json!({
+        "total_tours": stats.0,
+        "pending": stats.1,
+        "fulfilled": stats.2,
+        "expired": stats.3,
+        "delisted": stats.4,
+        "total_revenue_kes": stats.5.unwrap_or(0.0),
+        "avg_fulfillment_hours": avg_fulfillment.unwrap_or(0.0),
+    }))
 }
