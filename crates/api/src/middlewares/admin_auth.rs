@@ -98,7 +98,10 @@ pub async fn admin_auth_middleware(
         || path.starts_with("/admin/commissions/my")      // Wallet & payment history
         || path.starts_with("/admin/payments/")
         || path == "/admin/owner-inquiries"
-        || path.starts_with("/admin/owner-inquiries/");
+        || path.starts_with("/admin/owner-inquiries/")
+        || path.starts_with("/admin/locations/")
+        || path == "/admin/unit-features"
+        || path.starts_with("/admin/properties/");
     // ───────────────────────────────────────────
     // Authorization Logic
     // ───────────────────────────────────────────

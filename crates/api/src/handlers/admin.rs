@@ -283,23 +283,7 @@ pub async fn get_my_commissions_summary(
         }).collect::<Vec<_>>(),
     })))
 }
-#[derive(Deserialize)]
-pub struct CreatePropertyRequest {
-    pub title: String,
-    pub description: Option<String>,
-    pub property_type: Option<String>,
-    pub price: Option<f64>,
-    pub county: Option<String>,
-    pub location: Option<String>,
-    pub plot_number: Option<String>,
-    pub constituency: Option<String>,
-    pub ward: Option<String>,
-    pub purpose: Option<String>,
-    pub general_features: Option<serde_json::Value>,
-    pub video_url: Option<String>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-}
+
 
 #[derive(Deserialize)]
 pub struct ToggleActiveRequest {
@@ -510,88 +494,49 @@ pub async fn get_property_detail(
     let property = admin_service::get_property_detail(&state.db, &id).await?;
     Ok(Json(property))
 }
-
-pub async fn create_property(
+#[derive(Deserialize)]
+pub struct CreatePropertyRequest {
+    pub id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    // ✅ NEW: Purpose replaces price as the key property attribute
+    pub purpose: String,           // "for_rent" | "for_sale" | "for_rent_and_sale"
+    pub property_type: String,     // "apartment", "bungalow", "land", etc.
+    pub status: Option<String>,
+    // ✅ NEW: Land-specific fields
+    pub is_land: Option<bool>,
+    pub plot_size: Option<String>,       // "1/8 acre", "50x100"
+    pub plot_dimensions: Option<String>, // "50ft x 100ft"
+    pub land_price: Option<f64>,         // Only for land
+    // Location
+    pub county: Option<String>,
+    pub constituency: Option<String>,
+    pub ward: Option<String>,
+    pub location: Option<String>,
+    pub village: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub map_address: Option<String>,
+    #[serde(default)]
+    pub images: Vec<String>,
+    // ❌ REMOVED: price, bedrooms, bathrooms, area_sqft (these belong to units)
+}
+pub async fn create_or_update_property(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(req): Json<CreatePropertyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let user_id = Uuid::parse_str(&claims.sub)
+    let owner_id = Uuid::parse_str(&claims.sub)
         .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
 
-    // 1. Verify user is a PROPERTY_OWNER
-    let user_role: String = sqlx::query_scalar(
-        "SELECT role::text FROM account_users WHERE id = $1"
-    )
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("User not found".into()))?;
+    let result = admin_service::create_or_update_property(
+        &state.db,
+        &owner_id,
+        &req,
+    ).await?;
 
-    if user_role.to_uppercase() != "PROPERTY_OWNER" {
-        return Err(ApiError::BadRequest(
-            "Only PROPERTY_OWNERs can create properties".into()
-        ));
-    }
-
-    // 2. Check if they've paid the registration fee (GATE)
-    let has_paid = admin_service::has_paid_registration_fee(&state.db, &user_id).await?;
-    if !has_paid {
-        return Err(ApiError::BadRequest(
-            "You must pay the registration fee (KES 1000) before creating properties. Please complete the payment first.".into()
-        ));
-    }
-
-    // 3. Create the property
-    let property_id = Uuid::new_v4();
-    let property_type_enum = req.property_type.as_deref().unwrap_or("apartment");
-
-    sqlx::query(
-        r#"
-        INSERT INTO properties
-            (id, title, description, property_type, price, owner_id, status,
-             county, location, plot_number, constituency, ward, purpose,
-             general_features, video_url, latitude, longitude, is_active, subscription_status)
-        VALUES ($1, $2, $3, $4::text::property_type, $5, $6, 'available',
-                $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, TRUE, 'active')
-        "#
-    )
-        .bind(property_id)
-        .bind(&req.title)
-        .bind(&req.description)
-        .bind(property_type_enum)
-        .bind(req.price)
-        .bind(user_id)
-        .bind(&req.county)
-        .bind(&req.location)
-        .bind(&req.plot_number)
-        .bind(&req.constituency)
-        .bind(&req.ward)
-        .bind(&req.purpose)
-        .bind(&req.general_features)
-        .bind(&req.video_url)
-        .bind(req.latitude)
-        .bind(req.longitude)
-        .execute(&state.db.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to create property: {}", e)))?;
-
-    // 4. Update property_owner_profiles count
-    sqlx::query(
-        "UPDATE property_owner_profiles SET properties_owned = properties_owned + 1, updated_at = NOW() WHERE user_id = $1"
-    )
-        .bind(user_id)
-        .execute(&state.db.pool)
-        .await?;
-
-    tracing::info!("✅ Property created: {} by owner {}", property_id, user_id);
-
-    Ok(Json(serde_json::json!({
-        "message": "Property created successfully",
-        "property_id": property_id.to_string()
-    })))
+    Ok(Json(result))
 }
-
 // ───────────────────────────────────────────
 // Leads
 // ───────────────────────────────────────────
@@ -1542,4 +1487,96 @@ pub async fn get_tour_stats_admin(
     }
     let stats = admin_service::get_tour_stats_admin(&state.db).await?;
     Ok(Json(stats))
+}
+
+// ───────────────────────────────────────────
+// Location Hierarchy Handlers
+// ───────────────────────────────────────────
+pub async fn get_countries(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let countries = admin_service::get_countries(&state.db).await?;
+    Ok(Json(countries))
+}
+
+pub async fn get_location_children(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    Path(parent_id): Path<i32>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let children = admin_service::get_location_children(&state.db, parent_id).await?;
+    Ok(Json(children))
+}
+
+pub async fn get_unit_features(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let features = admin_service::get_unit_features(&state.db).await?;
+    Ok(Json(features))
+}
+
+// ───────────────────────────────────────────
+// Property Units Handlers
+// ───────────────────────────────────────────
+#[derive(Deserialize)]
+pub struct CreateUnitRequest {
+    pub property_id: String,
+    pub unit: serde_json::Value,
+}
+
+pub async fn create_property_unit(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CreateUnitRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let owner_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let property_id = Uuid::parse_str(&req.property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+
+    let result = admin_service::create_property_unit(&state.db, &property_id, &owner_id, &req.unit).await?;
+    Ok(Json(result))
+}
+
+pub async fn get_property_units(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    Path(property_id): Path<String>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let prop_id = Uuid::parse_str(&property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+    let units = admin_service::get_property_units(&state.db, &prop_id).await?;
+    Ok(Json(units))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateGeolocationRequest {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub map_address: Option<String>,
+}
+
+pub async fn update_geolocation(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(property_id): Path<String>,
+    Json(req): Json<UpdateGeolocationRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let owner_id = Uuid::parse_str(&claims.sub)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid user ID: {}", e)))?;
+    let prop_id = Uuid::parse_str(&property_id)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid property ID: {}", e)))?;
+
+    admin_service::update_property_geolocation(
+        &state.db,
+        &prop_id,
+        &owner_id,
+        req.latitude,
+        req.longitude,
+        req.map_address.as_deref(),
+    ).await?;
+
+    Ok(Json(serde_json::json!({ "message": "Geolocation updated" })))
 }

@@ -4264,3 +4264,297 @@ pub async fn get_tour_stats_admin(
         "avg_fulfillment_hours": avg_fulfillment.unwrap_or(0.0),
     }))
 }
+
+// ═══════════════════════════════════════════
+// LOCATION HIERARCHY (Cascading Dropdowns)
+// ═══════════════════════════════════════════
+
+/// Get countries (or Kenya by default)
+pub async fn get_countries(db: &rento_core::Database) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        "SELECT id, name, code FROM locations WHERE level = 'country' ORDER BY name"
+    )
+        .fetch_all(pool(db))
+        .await?;
+
+    let countries: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<i32, _>("id").unwrap_or(0),
+            "name": row.try_get::<String, _>("name").unwrap_or_default(),
+            "code": row.try_get::<Option<String>, _>("code").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(countries)
+}
+
+/// Get children of a location (counties, constituencies, wards, etc.)
+pub async fn get_location_children(db: &rento_core::Database, parent_id: i32) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        "SELECT id, name, level, code FROM locations WHERE parent_id = $1 ORDER BY name"
+    )
+        .bind(parent_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let children: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        serde_json::json!({
+            "id": row.try_get::<i32, _>("id").unwrap_or(0),
+            "name": row.try_get::<String, _>("name").unwrap_or_default(),
+            "level": row.try_get::<String, _>("level").unwrap_or_default(),
+            "code": row.try_get::<Option<String>, _>("code").unwrap_or_default(),
+        })
+    }).collect();
+
+    Ok(children)
+}
+
+/// Get all unit features grouped by category
+pub async fn get_unit_features(db: &rento_core::Database) -> ApiResult<serde_json::Value> {
+    let rows = sqlx::query(
+        "SELECT name, category, icon, description FROM unit_features WHERE is_active = TRUE ORDER BY category, name"
+    )
+        .fetch_all(pool(db))
+        .await?;
+
+    let mut grouped: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+
+    for row in rows {
+        use sqlx::Row;
+        let category = row.try_get::<String, _>("category").unwrap_or_default();
+        let feature = serde_json::json!({
+            "name": row.try_get::<String, _>("name").unwrap_or_default(),
+            "icon": row.try_get::<Option<String>, _>("icon").unwrap_or_default(),
+            "description": row.try_get::<Option<String>, _>("description").unwrap_or_default(),
+        });
+        grouped.entry(category).or_default().push(feature);
+    }
+
+    Ok(serde_json::to_value(grouped).unwrap_or_default())
+}
+
+// ═══════════════════════════════════════════
+// PROPERTY UNITS MANAGEMENT
+// ═══════════════════════════════════════════
+
+/// Create a new unit within a property
+
+
+/// Get all units for a property
+pub async fn get_property_units(
+    db: &rento_core::Database,
+    property_id: &Uuid,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, unit_number, unit_type, bedrooms, bathrooms, area_sqft,
+               price::TEXT, status, floor_number, description, features::TEXT,
+               created_at
+        FROM property_units
+        WHERE property_id = $1
+        ORDER BY floor_number, unit_number
+        "#
+    )
+        .bind(property_id)
+        .fetch_all(pool(db))
+        .await?;
+
+    let units: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+        use sqlx::Row;
+        let features_str = row.try_get::<String, _>("features").unwrap_or_else(|_| "{}".to_string());
+        let features: serde_json::Value = serde_json::from_str(&features_str).unwrap_or_default();
+
+        serde_json::json!({
+            "id": row.try_get::<Uuid, _>("id").unwrap_or_default().to_string(),
+            "unit_number": row.try_get::<String, _>("unit_number").unwrap_or_default(),
+            "unit_type": row.try_get::<String, _>("unit_type").unwrap_or_default(),
+            "bedrooms": row.try_get::<Option<i32>, _>("bedrooms").unwrap_or(Option::from(0)),
+            "bathrooms": row.try_get::<Option<i32>, _>("bathrooms").unwrap_or(Option::from(0)),
+            "area_sqft": row.try_get::<Option<i32>, _>("area_sqft").unwrap_or(Option::from(0)),
+            "price": row.try_get::<Option<String>, _>("price").unwrap_or_default(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "floor_number": row.try_get::<Option<i32>, _>("floor_number").unwrap_or(Option::from(0)),
+            "description": row.try_get::<Option<String>, _>("description").ok().flatten(),
+            "features": features,
+        })
+    }).collect();
+
+    Ok(units)
+}
+
+/// Update property geolocation
+pub async fn update_property_geolocation(
+    db: &rento_core::Database,
+    property_id: &Uuid,
+    owner_id: &Uuid,
+    latitude: f64,
+    longitude: f64,
+    map_address: Option<&str>,
+) -> ApiResult<()> {
+    let is_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM properties WHERE id = $1 AND owner_id = $2)"
+    )
+        .bind(property_id)
+        .bind(owner_id)
+        .fetch_one(pool(db))
+        .await?;
+
+    if !is_owner {
+        return Err(ApiError::Unauthorized("You don't own this property".into()));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE properties
+        SET latitude = $1, longitude = $2, map_address = $3, geocoded_at = NOW(), updated_at = NOW()
+        WHERE id = $4
+        "#
+    )
+        .bind(latitude)
+        .bind(longitude)
+        .bind(map_address)
+        .bind(property_id)
+        .execute(pool(db))
+        .await?;
+
+    Ok(())
+}
+pub async fn create_or_update_property(
+    db: &rento_core::Database,
+    owner_id: &Uuid,
+    req: &crate::handlers::admin::CreatePropertyRequest,
+) -> ApiResult<serde_json::Value> {
+    let property_id = if let Some(id_str) = &req.id {
+        Uuid::parse_str(id_str).map_err(|e| ApiError::BadRequest(format!("Invalid ID: {}", e)))?
+    } else {
+        Uuid::new_v4()
+    };
+
+    // Validate purpose
+    let valid_purposes = ["for_rent", "for_sale", "for_rent_and_sale"];
+    if !valid_purposes.contains(&req.purpose.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "Invalid purpose '{}'. Must be one of: {}",
+            req.purpose, valid_purposes.join(", ")
+        )));
+    }
+
+    // Validate: land must have a price, buildings must not have price at property level
+    let is_land = req.is_land.unwrap_or(false) || req.property_type.to_lowercase() == "land";
+    if is_land && req.land_price.is_none() {
+        return Err(ApiError::BadRequest("Land must have a price".into()));
+    }
+
+    if req.id.is_some() {
+        // UPDATE existing property
+        sqlx::query(
+            r#"
+            UPDATE properties SET
+                title = $1, description = $2,
+                purpose = $3, property_type = $4::text::property_type,
+                status = $5::text::property_status,
+                is_land = $6, plot_size = $7, plot_dimensions = $8, land_price = $9,
+                county = $10, constituency = $11, ward = $12, location = $13, village = $14,
+                latitude = $15, longitude = $16, map_address = $17, images = $18::text[],
+                updated_at = NOW()
+            WHERE id = $19 AND owner_id = $20
+            "#
+        )
+            .bind(&req.title).bind(&req.description)
+            .bind(&req.purpose).bind(&req.property_type)
+            .bind(req.status.as_deref().unwrap_or("available"))
+            .bind(is_land).bind(&req.plot_size).bind(&req.plot_dimensions).bind(req.land_price)
+            .bind(&req.county).bind(&req.constituency).bind(&req.ward).bind(&req.location).bind(&req.village)
+            .bind(req.latitude).bind(req.longitude).bind(&req.map_address).bind(&req.images)
+            .bind(property_id).bind(owner_id)
+            .execute(pool(db)).await?;
+    } else {
+        // CREATE new property
+        sqlx::query(
+            r#"
+            INSERT INTO properties
+                (id, owner_id, title, description, purpose, property_type, status,
+                 is_land, plot_size, plot_dimensions, land_price,
+                 county, constituency, ward, location, village,
+                 latitude, longitude, map_address, images, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6::text::property_type, $7::text::property_status,
+                    $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16,
+                    $17, $18, $19, $20::text[], NOW(), NOW())
+            "#
+        )
+            .bind(property_id).bind(owner_id)
+            .bind(&req.title).bind(&req.description)
+            .bind(&req.purpose).bind(&req.property_type)
+            .bind(req.status.as_deref().unwrap_or("available"))
+            .bind(is_land).bind(&req.plot_size).bind(&req.plot_dimensions).bind(req.land_price)
+            .bind(&req.county).bind(&req.constituency).bind(&req.ward).bind(&req.location).bind(&req.village)
+            .bind(req.latitude).bind(req.longitude).bind(&req.map_address).bind(&req.images)
+            .execute(pool(db)).await?;
+    }
+
+    tracing::info!("🏠 Property {} saved by owner {} (purpose: {}, land: {})",
+        property_id, owner_id, req.purpose, is_land);
+
+    Ok(serde_json::json!({
+        "property_id": property_id.to_string(),
+        "message": if req.id.is_some() { "Property updated" } else { "Property created" },
+        "is_land": is_land,
+    }))
+}
+
+pub async fn create_property_unit(
+    db: &rento_core::Database,
+    property_id: &Uuid,
+    owner_id: &Uuid,
+    unit: &serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    // Verify ownership
+    let is_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM properties WHERE id = $1 AND owner_id = $2)"
+    ).bind(property_id).bind(owner_id).fetch_one(pool(db)).await?;
+
+    if !is_owner {
+        return Err(ApiError::Unauthorized("You don't own this property".into()));
+    }
+
+    // Prevent adding units to land
+    let is_land: bool = sqlx::query_scalar(
+        "SELECT COALESCE(is_land, FALSE) FROM properties WHERE id = $1"
+    ).bind(property_id).fetch_one(pool(db)).await?;
+
+    if is_land {
+        return Err(ApiError::BadRequest("Cannot add units to land. Land is listed directly.".into()));
+    }
+
+    let unit_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO property_units
+            (property_id, unit_number, unit_type, purpose, bedrooms, bathrooms,
+             area_sqft, price, status, floor_number, description, features)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+        RETURNING id
+        "#
+    )
+        .bind(property_id)
+        .bind(unit.get("unit_number").and_then(|v| v.as_str()).unwrap_or(""))
+        .bind(unit.get("unit_type").and_then(|v| v.as_str()).unwrap_or("one_bedroom"))
+        .bind(unit.get("purpose").and_then(|v| v.as_str()).unwrap_or("for_rent"))  // ✅ NEW
+        .bind(unit.get("bedrooms").and_then(|v| v.as_i64()).map(|v| v as i32))
+        .bind(unit.get("bathrooms").and_then(|v| v.as_i64()).map(|v| v as i32))
+        .bind(unit.get("area_sqft").and_then(|v| v.as_i64()).map(|v| v as i32))
+        .bind(unit.get("price").and_then(|v| v.as_f64()))
+        .bind(unit.get("status").and_then(|v| v.as_str()).unwrap_or("available"))
+        .bind(unit.get("floor_number").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(0))
+        .bind(unit.get("description").and_then(|v| v.as_str()))
+        .bind(unit.get("features").unwrap_or(&serde_json::json!({})).to_string())
+        .fetch_one(pool(db)).await?;
+
+    tracing::info!("🏠 Unit {} created for property {}", unit_id, property_id);
+    Ok(serde_json::json!({
+        "unit_id": unit_id.to_string(),
+        "message": "Unit created successfully"
+    }))
+}

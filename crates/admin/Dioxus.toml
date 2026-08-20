@@ -3,7 +3,7 @@ name = "rento-admin"
 asset_dir = "../../assets"
 
 [web.app]
-title = "Rento Admin"
+#title = "Rento Admin"
 
 [web.resource]
 style = ["/tailwind.css"]

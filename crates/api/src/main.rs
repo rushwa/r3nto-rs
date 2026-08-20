@@ -172,10 +172,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/users/:id/role", post(handlers::admin::update_user_role))
         .route("/admin/mpesa/stk-push", post(handlers::mpesa::initiate_payment))
         .route("/admin/agents", get(handlers::admin::get_agents))
-        // NOTE: Ensure handlers::admin::get_properties accepts Extension(claims): Extension<Claims>
-        .route("/admin/properties", get(handlers::admin::get_properties).post(handlers::admin::create_property))
+        .route("/admin/properties", get(handlers::admin::get_properties))
+        .route("/admin/properties/create", post(handlers::admin::create_or_update_property))
         .route("/admin/properties/:id", get(handlers::admin::get_property_detail))
-        .route("/admin/property-owners", get(handlers::admin::get_property_owners_with_status))
+        // Location hierarchy (cascading dropdowns)
+        .route("/admin/locations/countries", get(handlers::admin::get_countries))
+        .route("/admin/locations/:parent_id/children", get(handlers::admin::get_location_children))
+
+        // Unit features
+        .route("/admin/unit-features", get(handlers::admin::get_unit_features))
+
+        // Property units
+        .route("/admin/properties/units", post(handlers::admin::create_property_unit))
+        .route("/admin/properties/:id/units", get(handlers::admin::get_property_units))
+
+        // Geolocation
+        .route("/admin/properties/:id/geolocation", post(handlers::admin::update_geolocation))
         // NEW: Route for agent leads
         .route("/admin/leads", get(handlers::admin::get_agent_leads))
         .route("/admin/agents/handshake/initiate", post(handlers::admin::initiate_handshake))
