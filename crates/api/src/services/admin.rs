@@ -488,70 +488,96 @@ pub async fn has_paid_registration_fee(db: &rento_core::Database, user_id: &Uuid
 pub async fn get_properties(db: &rento_core::Database, claims: &Claims) -> ApiResult<Vec<Property>> {
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
-
     let role_upper = claims.role.to_uppercase();
 
     let rows: Vec<PropertyDbRow> = if role_upper == "AGENT" {
-        // AGENT: Only see properties owned by property owners they converted
         sqlx::query_as(
             r#"
             SELECT
-                p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+                p.id, p.title, p.description, p.status::text as status,
                 COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
                 COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
                 COALESCE(p.property_type::text, '') as property_type,
-                0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+                COALESCE(p.purpose, 'for_rent') as purpose,
+                COALESCE(p.is_land, FALSE) as is_land,
+                p.plot_size, p.plot_dimensions, p.land_price::float8 as land_price,
+                COALESCE(unit_stats.unit_count, 0) as unit_count,
+                unit_stats.min_unit_price, unit_stats.max_unit_price,
                 p.created_at
             FROM properties p
             JOIN account_users u ON p.owner_id = u.id
             JOIN agent_conversions ac ON p.owner_id = ac.property_owner_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::bigint as unit_count,
+                    MIN(price)::float8 as min_unit_price,
+                    MAX(price)::float8 as max_unit_price
+                FROM property_units pu
+                WHERE pu.property_id = p.id
+            ) unit_stats ON TRUE
             WHERE ac.agent_id = $1
             ORDER BY p.created_at DESC
             "#
-        )
-            .bind(user_id)
-            .fetch_all(pool(db)).await?
+        ).bind(user_id).fetch_all(pool(db)).await?
     } else if role_upper == "PROPERTY_OWNER" {
-        // PROPERTY_OWNER: Only see their own properties
         sqlx::query_as(
             r#"
             SELECT
-                p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+                p.id, p.title, p.description, p.status::text as status,
                 COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
                 COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
                 COALESCE(p.property_type::text, '') as property_type,
-                0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+                COALESCE(p.purpose, 'for_rent') as purpose,
+                COALESCE(p.is_land, FALSE) as is_land,
+                p.plot_size, p.plot_dimensions, p.land_price::float8 as land_price,
+                COALESCE(unit_stats.unit_count, 0) as unit_count,
+                unit_stats.min_unit_price, unit_stats.max_unit_price,
                 p.created_at
             FROM properties p
             JOIN account_users u ON p.owner_id = u.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::bigint as unit_count,
+                    MIN(price)::float8 as min_unit_price,
+                    MAX(price)::float8 as max_unit_price
+                FROM property_units pu
+                WHERE pu.property_id = p.id
+            ) unit_stats ON TRUE
             WHERE p.owner_id = $1
             ORDER BY p.created_at DESC
             "#
-        )
-            .bind(user_id)
-            .fetch_all(pool(db)).await?
+        ).bind(user_id).fetch_all(pool(db)).await?
     } else {
-        // ADMIN/SUPERUSER: See all properties
         sqlx::query_as(
             r#"
             SELECT
-                p.id, p.title, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
+                p.id, p.title, p.description, p.status::text as status,
                 COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
                 COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
                 COALESCE(p.property_type::text, '') as property_type,
-                0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
+                COALESCE(p.purpose, 'for_rent') as purpose,
+                COALESCE(p.is_land, FALSE) as is_land,
+                p.plot_size, p.plot_dimensions, p.land_price::float8 as land_price,
+                COALESCE(unit_stats.unit_count, 0) as unit_count,
+                unit_stats.min_unit_price, unit_stats.max_unit_price,
                 p.created_at
             FROM properties p
             JOIN account_users u ON p.owner_id = u.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::bigint as unit_count,
+                    MIN(price)::float8 as min_unit_price,
+                    MAX(price)::float8 as max_unit_price
+                FROM property_units pu
+                WHERE pu.property_id = p.id
+            ) unit_stats ON TRUE
             ORDER BY p.created_at DESC
             "#
-        )
-            .fetch_all(pool(db)).await?
+        ).fetch_all(pool(db)).await?
     };
 
     Ok(rows.into_iter().map(Property::from).collect())
 }
-
 pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResult<PropertyDetail> {
     let property_id = Uuid::parse_str(id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
@@ -559,24 +585,39 @@ pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResu
     let row = sqlx::query(
         r#"
         SELECT
-            p.id, p.title, p.description, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
-            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+            p.id, p.title, p.description, p.status::text as status,
+            p.county, p.constituency, p.ward, p.location, p.village,
+            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as display_location,
             COALESCE(p.property_type::text, '') as property_type,
-            0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
-            '{}'::text[] as features, '{}'::text[] as images,
+            COALESCE(p.purpose, 'for_rent') as purpose,
+            COALESCE(p.is_land, FALSE) as is_land,
+            p.plot_size, p.plot_dimensions, p.land_price::float8 as land_price,
+            p.latitude::float8 as latitude,
+            p.longitude::float8 as longitude,
+            p.map_address,
+            COALESCE(p.images, '{}'::text[]) as images,
             p.created_at as listing_date,
-            0 as views, 0 as inquiries,
+            COALESCE(p.views_count, 0) as views,
+            COALESCE(p.inquiries_count, 0) as inquiries,
+            COALESCE(unit_stats.unit_count, 0) as unit_count,
+            unit_stats.min_unit_price, unit_stats.max_unit_price,
             u.id as owner_id,
             COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
             u.email as owner_email,
             u.role::text as owner_role
         FROM properties p
         JOIN account_users u ON p.owner_id = u.id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*)::bigint as unit_count,
+                MIN(price)::float8 as min_unit_price,
+                MAX(price)::float8 as max_unit_price
+            FROM property_units pu
+            WHERE pu.property_id = p.id
+        ) unit_stats ON TRUE
         WHERE p.id = $1
         "#
-    )
-        .bind(property_id)
-        .fetch_one(pool(db)).await?;
+    ).bind(property_id).fetch_one(pool(db)).await?;
 
     let owner = PropertyOwner {
         id: row.try_get::<sqlx::types::Uuid, _>("owner_id")?.to_string(),
@@ -589,22 +630,32 @@ pub async fn get_property_detail(db: &rento_core::Database, id: &str) -> ApiResu
         id: row.try_get::<sqlx::types::Uuid, _>("id")?.to_string(),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
-        price: row.try_get::<f64, _>("price")?,
         status: row.try_get("status")?,
         owner,
+        county: row.try_get("county")?,
+        constituency: row.try_get("constituency")?,
+        ward: row.try_get("ward")?,
         location: row.try_get("location")?,
+        village: row.try_get("village")?,
+        display_location: row.try_get("display_location")?,
         property_type: row.try_get("property_type")?,
-        bedrooms: row.try_get::<i32, _>("bedrooms")? as u32,
-        bathrooms: row.try_get::<i32, _>("bathrooms")? as u32,
-        area_sqft: row.try_get::<i32, _>("area_sqft")? as u32,
-        features: row.try_get::<Vec<String>, _>("features").unwrap_or_default(),
+        purpose: row.try_get("purpose")?,
+        is_land: row.try_get("is_land")?,
+        plot_size: row.try_get("plot_size")?,
+        plot_dimensions: row.try_get("plot_dimensions")?,
+        land_price: row.try_get("land_price")?,
+        latitude: row.try_get("latitude")?,
+        longitude: row.try_get("longitude")?,
+        map_address: row.try_get("map_address")?,
+        unit_count: row.try_get("unit_count")?,
+        min_unit_price: row.try_get("min_unit_price")?,
+        max_unit_price: row.try_get("max_unit_price")?,
         images: row.try_get::<Vec<String>, _>("images").unwrap_or_default(),
         listing_date: row.try_get::<chrono::DateTime<chrono::Utc>, _>("listing_date")?.format("%Y-%m-%d").to_string(),
         views: row.try_get::<i32, _>("views")? as u32,
         inquiries: row.try_get::<i32, _>("inquiries")? as u32,
     })
 }
-
 pub async fn get_commissions(db: &rento_core::Database) -> ApiResult<Vec<Commission>> {
     let rows: Vec<CommissionDbRow> = sqlx::query_as(
         r#"
@@ -4011,20 +4062,37 @@ pub async fn get_public_properties(db: &rento_core::Database) -> ApiResult<Vec<P
 
 pub async fn get_public_property_detail(db: &rento_core::Database, id: &str) -> ApiResult<PropertyDetail> {
     let property_id = Uuid::parse_str(id).map_err(|e| ApiError::BadRequest(format!("Invalid UUID: {}", e)))?;
+
     let row = sqlx::query(
         r#"
         SELECT
-            p.id, p.title, p.description, COALESCE(p.price, 0)::float8 as price, p.status::text as status,
-            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as location,
+            p.id, p.title, p.description, p.status::text as status,
+            p.county, p.constituency, p.ward, p.location, p.village,
+            COALESCE(p.county || ', ' || p.location, p.location, p.county, '') as display_location,
             COALESCE(p.property_type::text, '') as property_type,
-            0 as bedrooms, 0 as bathrooms, 0 as area_sqft,
-            '{}'::text[] as features, '{}'::text[] as images,
-            p.created_at as listing_date, 0 as views, 0 as inquiries,
+            COALESCE(p.purpose, 'for_rent') as purpose,
+            COALESCE(p.is_land, FALSE) as is_land,
+            p.plot_size, p.plot_dimensions, p.land_price::float8 as land_price,
+            p.latitude, p.longitude, p.map_address,
+            COALESCE(p.images, '{}'::text[]) as images,
+            p.created_at as listing_date,
+            COALESCE(p.views_count, 0) as views,
+            COALESCE(p.inquiries_count, 0) as inquiries,
+            COALESCE(unit_stats.unit_count, 0) as unit_count,
+            unit_stats.min_unit_price, unit_stats.max_unit_price,
             u.id as owner_id,
             COALESCE(NULLIF(u.first_name || ' ' || u.last_name, ' '), u.username) as owner_name,
             'hidden' as owner_email, 'PROPERTY_OWNER' as owner_role
         FROM properties p
         JOIN account_users u ON p.owner_id = u.id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*)::bigint as unit_count,
+                MIN(price)::float8 as min_unit_price,
+                MAX(price)::float8 as max_unit_price
+            FROM property_units pu
+            WHERE pu.property_id = p.id
+        ) unit_stats ON TRUE
         WHERE p.id = $1 AND p.status = 'available' AND COALESCE(p.is_delisted, FALSE) = FALSE
         "#
     ).bind(property_id).fetch_optional(pool(db)).await?;
@@ -4034,7 +4102,7 @@ pub async fn get_public_property_detail(db: &rento_core::Database, id: &str) -> 
     let owner = PropertyOwner {
         id: row.try_get::<sqlx::types::Uuid, _>("owner_id")?.to_string(),
         name: row.try_get("owner_name")?,
-        email: "Contact via platform".to_string(), // Hide email publicly
+        email: "Contact via platform".to_string(),
         role: row.try_get("owner_role")?,
     };
 
@@ -4042,22 +4110,32 @@ pub async fn get_public_property_detail(db: &rento_core::Database, id: &str) -> 
         id: row.try_get::<sqlx::types::Uuid, _>("id")?.to_string(),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
-        price: row.try_get::<f64, _>("price")?,
         status: row.try_get("status")?,
         owner,
+        county: row.try_get("county")?,
+        constituency: row.try_get("constituency")?,
+        ward: row.try_get("ward")?,
         location: row.try_get("location")?,
+        village: row.try_get("village")?,
+        display_location: row.try_get("display_location")?,
         property_type: row.try_get("property_type")?,
-        bedrooms: row.try_get::<i32, _>("bedrooms")? as u32,
-        bathrooms: row.try_get::<i32, _>("bathrooms")? as u32,
-        area_sqft: row.try_get::<i32, _>("area_sqft")? as u32,
-        features: row.try_get::<Vec<String>, _>("features").unwrap_or_default(),
+        purpose: row.try_get("purpose")?,
+        is_land: row.try_get("is_land")?,
+        plot_size: row.try_get("plot_size")?,
+        plot_dimensions: row.try_get("plot_dimensions")?,
+        land_price: row.try_get("land_price")?,
+        latitude: row.try_get("latitude")?,
+        longitude: row.try_get("longitude")?,
+        map_address: row.try_get("map_address")?,
+        unit_count: row.try_get("unit_count")?,
+        min_unit_price: row.try_get("min_unit_price")?,
+        max_unit_price: row.try_get("max_unit_price")?,
         images: row.try_get::<Vec<String>, _>("images").unwrap_or_default(),
         listing_date: row.try_get::<chrono::DateTime<chrono::Utc>, _>("listing_date")?.format("%Y-%m-%d").to_string(),
         views: row.try_get::<i32, _>("views")? as u32,
         inquiries: row.try_get::<i32, _>("inquiries")? as u32,
     })
 }
-
 // Add at the bottom of services/admin.rs
 pub async fn get_client_tours(
     db: &rento_core::Database,
@@ -4349,17 +4427,14 @@ pub async fn get_property_units(
 ) -> ApiResult<Vec<serde_json::Value>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, unit_number, unit_type, bedrooms, bathrooms, area_sqft,
+        SELECT id, unit_number, unit_type, purpose, bedrooms, bathrooms, area_sqft,
                price::TEXT, status, floor_number, description, features::TEXT,
                created_at
         FROM property_units
         WHERE property_id = $1
         ORDER BY floor_number, unit_number
         "#
-    )
-        .bind(property_id)
-        .fetch_all(pool(db))
-        .await?;
+    ).bind(property_id).fetch_all(pool(db)).await?;
 
     let units: Vec<serde_json::Value> = rows.into_iter().map(|row| {
         use sqlx::Row;
@@ -4370,12 +4445,13 @@ pub async fn get_property_units(
             "id": row.try_get::<Uuid, _>("id").unwrap_or_default().to_string(),
             "unit_number": row.try_get::<String, _>("unit_number").unwrap_or_default(),
             "unit_type": row.try_get::<String, _>("unit_type").unwrap_or_default(),
-            "bedrooms": row.try_get::<Option<i32>, _>("bedrooms").unwrap_or(Option::from(0)),
-            "bathrooms": row.try_get::<Option<i32>, _>("bathrooms").unwrap_or(Option::from(0)),
-            "area_sqft": row.try_get::<Option<i32>, _>("area_sqft").unwrap_or(Option::from(0)),
+            "purpose": row.try_get::<String, _>("purpose").unwrap_or_else(|_| "for_rent".to_string()),
+            "bedrooms": row.try_get::<Option<i32>, _>("bedrooms").unwrap_or(Some(0)),
+            "bathrooms": row.try_get::<Option<i32>, _>("bathrooms").unwrap_or(Some(0)),
+            "area_sqft": row.try_get::<Option<i32>, _>("area_sqft").unwrap_or(Some(0)),
             "price": row.try_get::<Option<String>, _>("price").unwrap_or_default(),
             "status": row.try_get::<String, _>("status").unwrap_or_default(),
-            "floor_number": row.try_get::<Option<i32>, _>("floor_number").unwrap_or(Option::from(0)),
+            "floor_number": row.try_get::<Option<i32>, _>("floor_number").unwrap_or(Some(0)),
             "description": row.try_get::<Option<String>, _>("description").ok().flatten(),
             "features": features,
         })
@@ -4383,7 +4459,6 @@ pub async fn get_property_units(
 
     Ok(units)
 }
-
 /// Update property geolocation
 pub async fn update_property_geolocation(
     db: &rento_core::Database,
@@ -4441,20 +4516,23 @@ pub async fn create_or_update_property(
         )));
     }
 
-    // Validate: land must have a price, buildings must not have price at property level
+    // Detect land
     let is_land = req.is_land.unwrap_or(false) || req.property_type.to_lowercase() == "land";
+
+    // Validate: land must have a price
     if is_land && req.land_price.is_none() {
         return Err(ApiError::BadRequest("Land must have a price".into()));
     }
+
+    let status = req.status.as_deref().unwrap_or("available");
 
     if req.id.is_some() {
         // UPDATE existing property
         sqlx::query(
             r#"
             UPDATE properties SET
-                title = $1, description = $2,
-                purpose = $3, property_type = $4::text::property_type,
-                status = $5::text::property_status,
+                title = $1, description = $2, purpose = $3,
+                property_type = $4::text::property_type, status = $5::text::property_status,
                 is_land = $6, plot_size = $7, plot_dimensions = $8, land_price = $9,
                 county = $10, constituency = $11, ward = $12, location = $13, village = $14,
                 latitude = $15, longitude = $16, map_address = $17, images = $18::text[],
@@ -4462,9 +4540,8 @@ pub async fn create_or_update_property(
             WHERE id = $19 AND owner_id = $20
             "#
         )
-            .bind(&req.title).bind(&req.description)
-            .bind(&req.purpose).bind(&req.property_type)
-            .bind(req.status.as_deref().unwrap_or("available"))
+            .bind(&req.title).bind(&req.description).bind(&req.purpose)
+            .bind(&req.property_type).bind(status)
             .bind(is_land).bind(&req.plot_size).bind(&req.plot_dimensions).bind(req.land_price)
             .bind(&req.county).bind(&req.constituency).bind(&req.ward).bind(&req.location).bind(&req.village)
             .bind(req.latitude).bind(req.longitude).bind(&req.map_address).bind(&req.images)
@@ -4480,15 +4557,12 @@ pub async fn create_or_update_property(
                  county, constituency, ward, location, village,
                  latitude, longitude, map_address, images, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6::text::property_type, $7::text::property_status,
-                    $8, $9, $10, $11,
-                    $12, $13, $14, $15, $16,
-                    $17, $18, $19, $20::text[], NOW(), NOW())
+                    $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::text[], NOW(), NOW())
             "#
         )
             .bind(property_id).bind(owner_id)
-            .bind(&req.title).bind(&req.description)
-            .bind(&req.purpose).bind(&req.property_type)
-            .bind(req.status.as_deref().unwrap_or("available"))
+            .bind(&req.title).bind(&req.description).bind(&req.purpose)
+            .bind(&req.property_type).bind(status)
             .bind(is_land).bind(&req.plot_size).bind(&req.plot_dimensions).bind(req.land_price)
             .bind(&req.county).bind(&req.constituency).bind(&req.ward).bind(&req.location).bind(&req.village)
             .bind(req.latitude).bind(req.longitude).bind(&req.map_address).bind(&req.images)
@@ -4514,7 +4588,11 @@ pub async fn create_property_unit(
     // Verify ownership
     let is_owner: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM properties WHERE id = $1 AND owner_id = $2)"
-    ).bind(property_id).bind(owner_id).fetch_one(pool(db)).await?;
+    )
+        .bind(property_id)
+        .bind(owner_id)
+        .fetch_one(pool(db))
+        .await?;
 
     if !is_owner {
         return Err(ApiError::Unauthorized("You don't own this property".into()));
@@ -4531,17 +4609,17 @@ pub async fn create_property_unit(
 
     let unit_id: Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO property_units
-            (property_id, unit_number, unit_type, purpose, bedrooms, bathrooms,
-             area_sqft, price, status, floor_number, description, features)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
-        RETURNING id
-        "#
+    INSERT INTO property_units
+        (property_id, unit_number, unit_type, purpose, bedrooms, bathrooms,
+         area_sqft, price, status, floor_number, description, features)
+    VALUES ($1, $2, $3, $4::text::unit_purpose, $5, $6, $7, $8, $9::text::unit_status, $10, $11, $12::jsonb)
+    RETURNING id
+    "#
     )
         .bind(property_id)
         .bind(unit.get("unit_number").and_then(|v| v.as_str()).unwrap_or(""))
         .bind(unit.get("unit_type").and_then(|v| v.as_str()).unwrap_or("one_bedroom"))
-        .bind(unit.get("purpose").and_then(|v| v.as_str()).unwrap_or("for_rent"))  // ✅ NEW
+        .bind(unit.get("purpose").and_then(|v| v.as_str()).unwrap_or("for_rent"))
         .bind(unit.get("bedrooms").and_then(|v| v.as_i64()).map(|v| v as i32))
         .bind(unit.get("bathrooms").and_then(|v| v.as_i64()).map(|v| v as i32))
         .bind(unit.get("area_sqft").and_then(|v| v.as_i64()).map(|v| v as i32))

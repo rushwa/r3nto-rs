@@ -499,16 +499,19 @@ pub struct CreatePropertyRequest {
     pub id: Option<String>,
     pub title: String,
     pub description: Option<String>,
+
     // ✅ NEW: Purpose replaces price as the key property attribute
     pub purpose: String,           // "for_rent" | "for_sale" | "for_rent_and_sale"
-    pub property_type: String,     // "apartment", "bungalow", "land", etc.
+    pub property_type: String,     // "apartment", "maisonette", "land", etc.
     pub status: Option<String>,
+
     // ✅ NEW: Land-specific fields
     pub is_land: Option<bool>,
-    pub plot_size: Option<String>,       // "1/8 acre", "50x100"
-    pub plot_dimensions: Option<String>, // "50ft x 100ft"
-    pub land_price: Option<f64>,         // Only for land
-    // Location
+    pub plot_size: Option<String>,
+    pub plot_dimensions: Option<String>,
+    pub land_price: Option<f64>,
+
+    // Location (strings, not IDs)
     pub county: Option<String>,
     pub constituency: Option<String>,
     pub ward: Option<String>,
@@ -517,9 +520,9 @@ pub struct CreatePropertyRequest {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub map_address: Option<String>,
+
     #[serde(default)]
     pub images: Vec<String>,
-    // ❌ REMOVED: price, bedrooms, bathrooms, area_sqft (these belong to units)
 }
 pub async fn create_or_update_property(
     State(state): State<AppState>,

@@ -8,25 +8,18 @@ const API_BASE_URL: &str = "http://localhost:8000";
 struct PropertyInfo {
     id: String,
     title: String,
-    price: f64,
+    description: Option<String>,
     status: String,
     owner_name: String,
     location: String,
     property_type: String,
-    bedrooms: i32,
-    bathrooms: i32,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-struct UnitFormData {
-    unit_number: String,
-    unit_type: String,
-    bedrooms: String,
-    bathrooms: String,
-    area_sqft: String,
-    price: String,
-    floor_number: String,
-    description: String,
+    purpose: String,
+    is_land: bool,
+    plot_size: Option<String>,
+    land_price: Option<f64>,
+    unit_count: i64,
+    min_unit_price: Option<f64>,
+    max_unit_price: Option<f64>,
 }
 
 #[component]
@@ -36,6 +29,7 @@ pub fn PropertiesPage() -> Element {
     let user_role = auth.read().user.as_ref()
         .map(|u| u.role.to_uppercase())
         .unwrap_or_default();
+    let nav = use_navigator();
 
     let mut properties = use_signal(|| Vec::<PropertyInfo>::new());
     let mut loading = use_signal(|| true);
@@ -52,7 +46,8 @@ pub fn PropertiesPage() -> Element {
 
     // Unit form fields
     let mut unit_number = use_signal(|| String::new());
-    let mut unit_type = use_signal(|| "apartment".to_string());
+    let mut unit_type = use_signal(|| "one_bedroom".to_string());
+    let mut unit_purpose = use_signal(|| "for_rent".to_string());
     let mut unit_bedrooms = use_signal(|| String::new());
     let mut unit_bathrooms = use_signal(|| String::new());
     let mut unit_area = use_signal(|| String::new());
@@ -62,13 +57,12 @@ pub fn PropertiesPage() -> Element {
 
     // Property form fields
     let mut form_title = use_signal(|| String::new());
-    let mut form_price = use_signal(|| String::new());
+    let mut form_purpose = use_signal(|| "for_rent".to_string());
     let mut form_type = use_signal(|| "apartment".to_string());
     let mut form_status = use_signal(|| "available".to_string());
-    let mut form_bedrooms = use_signal(|| String::new());
-    let mut form_bathrooms = use_signal(|| String::new());
-    let mut form_area_sqft = use_signal(|| String::new());
     let mut form_description = use_signal(|| String::new());
+    let mut form_plot_size = use_signal(|| String::new());
+    let mut form_land_price = use_signal(|| String::new());
     let mut form_county = use_signal(|| String::new());
     let mut form_constituency = use_signal(|| String::new());
     let mut form_ward = use_signal(|| String::new());
@@ -79,6 +73,26 @@ pub fn PropertiesPage() -> Element {
     let mut form_map_address = use_signal(|| String::new());
 
     let is_owner = user_role == "PROPERTY_OWNER";
+
+    // ─── Helper: parse property from JSON ───
+    fn parse_prop(v: &serde_json::Value) -> Option<PropertyInfo> {
+        Some(PropertyInfo {
+            id: v.get("id")?.as_str()?.to_string(),
+            title: v.get("title")?.as_str()?.to_string(),
+            description: v.get("description").and_then(|d| d.as_str()).map(|s| s.to_string()),
+            status: v.get("status").and_then(|s| s.as_str()).unwrap_or("available").to_string(),
+            owner_name: v.get("owner_name").and_then(|o| o.as_str()).unwrap_or("").to_string(),
+            location: v.get("location").and_then(|l| l.as_str()).unwrap_or("").to_string(),
+            property_type: v.get("property_type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            purpose: v.get("purpose").and_then(|p| p.as_str()).unwrap_or("for_rent").to_string(),
+            is_land: v.get("is_land").and_then(|l| l.as_bool()).unwrap_or(false),
+            plot_size: v.get("plot_size").and_then(|p| p.as_str()).map(|s| s.to_string()),
+            land_price: v.get("land_price").and_then(|p| p.as_f64()),
+            unit_count: v.get("unit_count").and_then(|u| u.as_i64()).unwrap_or(0),
+            min_unit_price: v.get("min_unit_price").and_then(|p| p.as_f64()),
+            max_unit_price: v.get("max_unit_price").and_then(|p| p.as_f64()),
+        })
+    }
 
     // ─── Fetch properties ───
     let t1 = token.clone();
@@ -93,19 +107,7 @@ pub fn PropertiesPage() -> Element {
             {
                 Ok(r) if r.status().is_success() => {
                     if let Ok(data) = r.json::<Vec<serde_json::Value>>().await {
-                        let props: Vec<PropertyInfo> = data.into_iter().filter_map(|v| {
-                            Some(PropertyInfo {
-                                id: v.get("id")?.as_str()?.to_string(),
-                                title: v.get("title")?.as_str()?.to_string(),
-                                price: v.get("price").and_then(|p| p.as_f64()).unwrap_or(0.0),
-                                status: v.get("status").and_then(|s| s.as_str()).unwrap_or("available").to_string(),
-                                owner_name: v.get("owner_name").and_then(|o| o.as_str()).unwrap_or("").to_string(),
-                                location: v.get("location").and_then(|l| l.as_str()).unwrap_or("").to_string(),
-                                property_type: v.get("property_type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                                bedrooms: v.get("bedrooms").and_then(|b| b.as_i64()).unwrap_or(0) as i32,
-                                bathrooms: v.get("bathrooms").and_then(|b| b.as_i64()).unwrap_or(0) as i32,
-                            })
-                        }).collect();
+                        let props: Vec<PropertyInfo> = data.iter().filter_map(parse_prop).collect();
                         properties.set(props);
                     }
                 }
@@ -119,19 +121,40 @@ pub fn PropertiesPage() -> Element {
         });
     });
 
+    // ─── Reload helper ───
+    let reload_properties = {
+        let t = token.clone();
+        move || {
+            let t2 = t.clone();
+            spawn(async move {
+                if let Ok(resp) = reqwest::Client::new()
+                    .get(format!("{}/admin/properties", API_BASE_URL))
+                    .header("Authorization", format!("Bearer {}", t2))
+                    .send().await
+                {
+                    if let Ok(data) = resp.json::<Vec<serde_json::Value>>().await {
+                        let props: Vec<PropertyInfo> = data.iter().filter_map(parse_prop).collect();
+                        properties.set(props);
+                    }
+                }
+            });
+        }
+    };
+
     // ─── Save property handler ───
     let handle_save = {
         let t = token.clone();
+        let reload = reload_properties.clone();
         move |_: MouseEvent| {
             let t = t.clone();
+            let reload = reload.clone();
             let title = form_title.read().clone();
-            let price_str = form_price.read().clone();
+            let purpose = form_purpose.read().clone();
             let ptype = form_type.read().clone();
             let status = form_status.read().clone();
-            let beds = form_bedrooms.read().clone();
-            let baths = form_bathrooms.read().clone();
-            let area = form_area_sqft.read().clone();
             let desc = form_description.read().clone();
+            let plot_size = form_plot_size.read().clone();
+            let land_price = form_land_price.read().clone();
             let county = form_county.read().clone();
             let constituency = form_constituency.read().clone();
             let ward = form_ward.read().clone();
@@ -146,26 +169,30 @@ pub fn PropertiesPage() -> Element {
                 return;
             }
 
+            let is_land = ptype.to_lowercase() == "land";
+            if is_land && land_price.is_empty() {
+                error_msg.set("Land must have a price".to_string());
+                return;
+            }
+
             saving.set(true);
             error_msg.set(String::new());
 
             spawn(async move {
-                let price: Option<f64> = price_str.parse().ok();
-                let bedrooms: i32 = beds.parse().unwrap_or(0);
-                let bathrooms: i32 = baths.parse().unwrap_or(0);
-                let area_sqft: Option<i32> = area.parse().ok();
                 let latitude: Option<f64> = lat.parse().ok();
                 let longitude: Option<f64> = lng.parse().ok();
+                let land_price_val: Option<f64> = if is_land { land_price.parse().ok() } else { None };
 
                 let body = serde_json::json!({
                     "title": title,
                     "description": if desc.is_empty() { serde_json::Value::Null } else { serde_json::json!(desc) },
-                    "price": price,
+                    "purpose": purpose,
                     "property_type": ptype,
                     "status": status,
-                    "bedrooms": bedrooms,
-                    "bathrooms": bathrooms,
-                    "area_sqft": area_sqft,
+                    "is_land": is_land,
+                    "plot_size": if plot_size.is_empty() { serde_json::Value::Null } else { serde_json::json!(plot_size) },
+                    "plot_dimensions": serde_json::Value::Null,
+                    "land_price": land_price_val,
                     "county": if county.is_empty() { serde_json::Value::Null } else { serde_json::json!(county) },
                     "constituency": if constituency.is_empty() { serde_json::Value::Null } else { serde_json::json!(constituency) },
                     "ward": if ward.is_empty() { serde_json::Value::Null } else { serde_json::json!(ward) },
@@ -174,6 +201,7 @@ pub fn PropertiesPage() -> Element {
                     "latitude": latitude,
                     "longitude": longitude,
                     "map_address": if map_addr.is_empty() { serde_json::Value::Null } else { serde_json::json!(map_addr) },
+                    "images": []
                 });
 
                 match reqwest::Client::new()
@@ -186,11 +214,12 @@ pub fn PropertiesPage() -> Element {
                     Ok(r) if r.status().is_success() => {
                         show_form.set(false);
                         form_title.set(String::new());
-                        form_price.set(String::new());
-                        form_bedrooms.set(String::new());
-                        form_bathrooms.set(String::new());
-                        form_area_sqft.set(String::new());
+                        form_purpose.set("for_rent".to_string());
+                        form_type.set("apartment".to_string());
+                        form_status.set("available".to_string());
                         form_description.set(String::new());
+                        form_plot_size.set(String::new());
+                        form_land_price.set(String::new());
                         form_county.set(String::new());
                         form_constituency.set(String::new());
                         form_ward.set(String::new());
@@ -199,32 +228,7 @@ pub fn PropertiesPage() -> Element {
                         form_latitude.set(String::new());
                         form_longitude.set(String::new());
                         form_map_address.set(String::new());
-
-                        let t2 = t.clone();
-                        spawn(async move {
-                            if let Ok(resp) = reqwest::Client::new()
-                                .get(format!("{}/admin/properties", API_BASE_URL))
-                                .header("Authorization", format!("Bearer {}", t2))
-                                .send().await
-                            {
-                                if let Ok(data) = resp.json::<Vec<serde_json::Value>>().await {
-                                    let props: Vec<PropertyInfo> = data.into_iter().filter_map(|v| {
-                                        Some(PropertyInfo {
-                                            id: v.get("id")?.as_str()?.to_string(),
-                                            title: v.get("title")?.as_str()?.to_string(),
-                                            price: v.get("price").and_then(|p| p.as_f64()).unwrap_or(0.0),
-                                            status: v.get("status").and_then(|s| s.as_str()).unwrap_or("available").to_string(),
-                                            owner_name: v.get("owner_name").and_then(|o| o.as_str()).unwrap_or("").to_string(),
-                                            location: v.get("location").and_then(|l| l.as_str()).unwrap_or("").to_string(),
-                                            property_type: v.get("property_type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                                            bedrooms: v.get("bedrooms").and_then(|b| b.as_i64()).unwrap_or(0) as i32,
-                                            bathrooms: v.get("bathrooms").and_then(|b| b.as_i64()).unwrap_or(0) as i32,
-                                        })
-                                    }).collect();
-                                    properties.set(props);
-                                }
-                            }
-                        });
+                        reload();
                     }
                     Ok(r) => {
                         let err = r.text().await.unwrap_or_else(|_| "Failed to save".to_string());
@@ -240,11 +244,14 @@ pub fn PropertiesPage() -> Element {
     // ─── Save unit handler ───
     let handle_save_unit = {
         let t = token.clone();
+        let reload = reload_properties.clone();
         move |_: MouseEvent| {
             let t = t.clone();
+            let reload = reload.clone();
             let pid = unit_prop_id.read().clone();
             let unum = unit_number.read().clone();
             let utype = unit_type.read().clone();
+            let upurpose = unit_purpose.read().clone();
             let ubeds = unit_bedrooms.read().clone();
             let ubaths = unit_bathrooms.read().clone();
             let uarea = unit_area.read().clone();
@@ -266,13 +273,15 @@ pub fn PropertiesPage() -> Element {
                     "unit": {
                         "unit_number": unum,
                         "unit_type": utype,
+                        "purpose": upurpose,
                         "bedrooms": ubeds.parse::<i32>().unwrap_or(0),
                         "bathrooms": ubaths.parse::<i32>().unwrap_or(0),
                         "area_sqft": uarea.parse::<i32>().ok(),
                         "price": uprice.parse::<f64>().ok(),
+                        "status": "available",
                         "floor_number": ufloor.parse::<i32>().unwrap_or(0),
                         "description": if udesc.is_empty() { serde_json::Value::Null } else { serde_json::json!(udesc) },
-                        "features": {},
+                        "features": {}
                     }
                 });
 
@@ -286,12 +295,15 @@ pub fn PropertiesPage() -> Element {
                     Ok(r) if r.status().is_success() => {
                         show_unit_form.set(false);
                         unit_number.set(String::new());
+                        unit_type.set("one_bedroom".to_string());
+                        unit_purpose.set("for_rent".to_string());
                         unit_bedrooms.set(String::new());
                         unit_bathrooms.set(String::new());
                         unit_area.set(String::new());
                         unit_price.set(String::new());
                         unit_floor.set(String::new());
                         unit_desc.set(String::new());
+                        reload();
                     }
                     Ok(r) => {
                         let err = r.text().await.unwrap_or_else(|_| "Failed to save unit".to_string());
@@ -304,14 +316,15 @@ pub fn PropertiesPage() -> Element {
         }
     };
 
-    // ─── Pre-compute values ───
+    // ─── Pre-compute all display values BEFORE rsx! ───
     let is_loading = *loading.read();
     let err = error_msg.read().clone();
     let has_error = !err.is_empty();
     let props_list = properties.read().clone();
     let total_props = props_list.len();
+    let total_units: i64 = props_list.iter().map(|p| p.unit_count).sum();
+    let land_count = props_list.iter().filter(|p| p.is_land).count();
     let available_count = props_list.iter().filter(|p| p.status == "available").count();
-    let occupied_count = props_list.iter().filter(|p| p.status == "occupied").count();
     let form_visible = *show_form.read();
     let is_saving = *saving.read();
     let unit_form_visible = *show_unit_form.read();
@@ -319,18 +332,17 @@ pub fn PropertiesPage() -> Element {
     let unit_err = unit_error.read().clone();
     let has_unit_error = !unit_err.is_empty();
     let unit_pid_display = unit_prop_title.read().clone();
-
     let save_label = if is_saving { "Saving..." } else { "Save Property" };
     let unit_save_label = if unit_is_saving { "Saving..." } else { "Save Unit" };
+    let is_land_selected = form_type.read().to_lowercase() == "land";
 
     let title_val = form_title.read().clone();
-    let price_val = form_price.read().clone();
+    let purpose_val = form_purpose.read().clone();
     let type_val = form_type.read().clone();
     let status_val = form_status.read().clone();
-    let beds_val = form_bedrooms.read().clone();
-    let baths_val = form_bathrooms.read().clone();
-    let area_val = form_area_sqft.read().clone();
     let desc_val = form_description.read().clone();
+    let plot_size_val = form_plot_size.read().clone();
+    let land_price_val = form_land_price.read().clone();
     let county_val = form_county.read().clone();
     let constituency_val = form_constituency.read().clone();
     let ward_val = form_ward.read().clone();
@@ -342,12 +354,14 @@ pub fn PropertiesPage() -> Element {
 
     let unum_val = unit_number.read().clone();
     let utype_val = unit_type.read().clone();
+    let upurpose_val = unit_purpose.read().clone();
     let ubeds_val = unit_bedrooms.read().clone();
     let ubaths_val = unit_bathrooms.read().clone();
     let uarea_val = unit_area.read().clone();
     let uprice_val = unit_price.read().clone();
     let ufloor_val = unit_floor.read().clone();
     let udesc_val = unit_desc.read().clone();
+    let unit_price_label = if upurpose_val == "for_rent" { "Rent (KES/month) *" } else { "Sale Price (KES) *" };
 
     rsx! {
         div { class: "space-y-6",
@@ -355,7 +369,7 @@ pub fn PropertiesPage() -> Element {
             div { class: "flex items-center justify-between",
                 PageHeader {
                     title: "My Properties".to_string(),
-                    subtitle: "Manage property listings, units, and locations".to_string(),
+                    subtitle: "Manage buildings, units, and land listings".to_string(),
                 }
                 if is_owner {
                     button {
@@ -367,11 +381,25 @@ pub fn PropertiesPage() -> Element {
             }
 
             // ─── Stats ───
-            div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
+            div { class: "grid grid-cols-1 md:grid-cols-4 gap-4",
                 StatCard {
-                    title: "Total Properties".to_string(),
+                    title: "Properties".to_string(),
                     value: format!("{}", total_props),
                     icon: "🏘️".to_string(),
+                    change: "".to_string(),
+                    change_positive: true,
+                }
+                StatCard {
+                    title: "Total Units".to_string(),
+                    value: format!("{}", total_units),
+                    icon: "🏢".to_string(),
+                    change: "".to_string(),
+                    change_positive: true,
+                }
+                StatCard {
+                    title: "Land Plots".to_string(),
+                    value: format!("{}", land_count),
+                    icon: "🌍".to_string(),
                     change: "".to_string(),
                     change_positive: true,
                 }
@@ -381,13 +409,6 @@ pub fn PropertiesPage() -> Element {
                     icon: "✅".to_string(),
                     change: "".to_string(),
                     change_positive: true,
-                }
-                StatCard {
-                    title: "Occupied".to_string(),
-                    value: format!("{}", occupied_count),
-                    icon: "🔑".to_string(),
-                    change: "".to_string(),
-                    change_positive: false,
                 }
             }
 
@@ -418,50 +439,26 @@ pub fn PropertiesPage() -> Element {
             if !is_loading && !props_list.is_empty() {
                 div { class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4",
                     for prop in props_list.iter() {
-                        // ✅ WRAPPED IN LINK — makes card clickable
-                        Link {
+                        PropertyCard {
                             key: "{prop.id}",
-                            to: crate::AdminRoute::PropertyDetailPage { id: prop.id.clone() },
-                            class: "bg-gray-800 rounded-lg border border-gray-700 p-5 hover:border-blue-500/50 hover:shadow-lg transition-all cursor-pointer block",
-                            div { class: "flex items-start justify-between mb-3",
-                                h3 { class: "text-white font-semibold text-lg", "{prop.title}" }
-                                span { class: "px-2 py-1 rounded-full text-xs bg-gray-700 text-gray-300", "{prop.status}" }
-                            }
-                            p { class: "text-gray-400 text-sm mb-3", "📍 {prop.location}" }
-                            div { class: "grid grid-cols-3 gap-3 mb-3",
-                                div { class: "text-center",
-                                    p { class: "text-gray-500 text-xs", "Price" }
-                                    p { class: "text-white font-semibold text-sm", "KES {prop.price}" }
+                            property: prop.clone(),
+                            is_owner: is_owner,
+                            on_navigate: {
+                                let pid = prop.id.clone();
+                                let nav_clone = nav.clone();
+                                move |_| {
+                                    nav_clone.push(crate::AdminRoute::PropertyDetailPage { id: pid.clone() });
                                 }
-                                div { class: "text-center",
-                                    p { class: "text-gray-500 text-xs", "Type" }
-                                    p { class: "text-white font-semibold text-sm capitalize", "{prop.property_type}" }
+                            },
+                            on_add_unit: {
+                                let pid = prop.id.clone();
+                                let ptitle = prop.title.clone();
+                                move |_| {
+                                    unit_prop_id.set(pid.clone());
+                                    unit_prop_title.set(ptitle.clone());
+                                    show_unit_form.set(true);
                                 }
-                                div { class: "text-center",
-                                    p { class: "text-gray-500 text-xs", "Beds/Baths" }
-                                    p { class: "text-white font-semibold text-sm", "{prop.bedrooms}/{prop.bathrooms}" }
-                                }
-                            }
-                            if !prop.owner_name.is_empty() {
-                                p { class: "text-gray-500 text-xs mb-2", "👤 {prop.owner_name}" }
-                            }
-                            // ✅ ADD UNIT BUTTON (stop propagation so it doesn't navigate)
-                            div { class: "flex gap-2 mt-3",
-                                button {
-                                    class: "flex-1 bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                                    onclick: {
-                                        let pid = prop.id.clone();
-                                        let ptitle = prop.title.clone();
-                                        move |e: MouseEvent| {
-                                            e.stop_propagation();
-                                            unit_prop_id.set(pid.clone());
-                                            unit_prop_title.set(ptitle.clone());
-                                            show_unit_form.set(true);
-                                        }
-                                    },
-                                    "🏢 Add Unit"
-                                }
-                            }
+                            },
                         }
                     }
                 }
@@ -481,6 +478,7 @@ pub fn PropertiesPage() -> Element {
                                 }
                             }
 
+                            // Basic Information
                             div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5 mb-4",
                                 h3 { class: "text-white font-bold mb-4", "Basic Information" }
                                 div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
@@ -488,24 +486,38 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Property Title *" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
-                                            placeholder: "e.g., Modern 3BR Apartment",
+                                            placeholder: "e.g., Greenwood Gardens Apartments",
                                             value: "{title_val}",
                                             oninput: move |e: Event<FormData>| form_title.set(e.value()),
                                         }
                                     }
                                     div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Property Type" }
+                                        label { class: "block text-gray-400 text-sm mb-1", "Purpose *" }
+                                        select {
+                                            class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            value: "{purpose_val}",
+                                            onchange: move |e: Event<FormData>| form_purpose.set(e.value()),
+                                            option { value: "for_rent", "For Rent" }
+                                            option { value: "for_sale", "For Sale" }
+                                            option { value: "for_rent_and_sale", "For Rent & Sale" }
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-gray-400 text-sm mb-1", "Property Type *" }
                                         select {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
                                             value: "{type_val}",
                                             onchange: move |e: Event<FormData>| form_type.set(e.value()),
-                                            option { value: "apartment", "Apartment" }
-                                            option { value: "house", "House" }
+                                            option { value: "apartment", "Apartment / Flat" }
                                             option { value: "maisonette", "Maisonette" }
                                             option { value: "bungalow", "Bungalow" }
-                                            option { value: "commercial", "Commercial" }
-                                            option { value: "land", "Land" }
-                                            option { value: "office", "Office" }
+                                            option { value: "villa", "Villa" }
+                                            option { value: "townhouse", "Townhouse" }
+                                            option { value: "commercial", "Commercial Building" }
+                                            option { value: "office", "Office Space" }
+                                            option { value: "retail", "Retail / Shop" }
+                                            option { value: "warehouse", "Warehouse" }
+                                            option { value: "land", "Land / Plot" }
                                         }
                                     }
                                     div {
@@ -520,47 +532,49 @@ pub fn PropertiesPage() -> Element {
                                             option { value: "maintenance", "Maintenance" }
                                         }
                                     }
-                                    div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Price (KES)" }
-                                        input {
-                                            class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
-                                            r#type: "number",
-                                            value: "{price_val}",
-                                            oninput: move |e: Event<FormData>| form_price.set(e.value()),
+
+                                    // Land-specific fields (conditional)
+                                    if is_land_selected {
+                                        div { class: "md:col-span-2 bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-4",
+                                            p { class: "text-yellow-400 text-sm mb-3", "Land Details (no units)" }
+                                            div { class: "grid grid-cols-2 gap-4",
+                                                div {
+                                                    label { class: "block text-gray-400 text-sm mb-1", "Plot Size *" }
+                                                    select {
+                                                        class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                                        value: "{plot_size_val}",
+                                                        onchange: move |e: Event<FormData>| form_plot_size.set(e.value()),
+                                                        option { value: "", "Select plot size" }
+                                                        option { value: "50x100", "50x100 (Standard)" }
+                                                        option { value: "1/8 acre", "1/8 Acre" }
+                                                        option { value: "1/4 acre", "1/4 Acre" }
+                                                        option { value: "1/2 acre", "1/2 Acre" }
+                                                        option { value: "1 acre", "1 Acre" }
+                                                        option { value: "2 acres", "2 Acres" }
+                                                        option { value: "5 acres", "5 Acres" }
+                                                        option { value: "10+ acres", "10+ Acres" }
+                                                    }
+                                                }
+                                                div {
+                                                    label { class: "block text-gray-400 text-sm mb-1", "Land Price (KES) *" }
+                                                    input {
+                                                        class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                                        r#type: "number",
+                                                        placeholder: "5000000",
+                                                        value: "{land_price_val}",
+                                                        oninput: move |e: Event<FormData>| form_land_price.set(e.value()),
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                    div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Area (sq ft)" }
-                                        input {
-                                            class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
-                                            r#type: "number",
-                                            value: "{area_val}",
-                                            oninput: move |e: Event<FormData>| form_area_sqft.set(e.value()),
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Bedrooms" }
-                                        input {
-                                            class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
-                                            r#type: "number",
-                                            value: "{beds_val}",
-                                            oninput: move |e: Event<FormData>| form_bedrooms.set(e.value()),
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Bathrooms" }
-                                        input {
-                                            class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
-                                            r#type: "number",
-                                            value: "{baths_val}",
-                                            oninput: move |e: Event<FormData>| form_bathrooms.set(e.value()),
-                                        }
-                                    }
+
                                     div { class: "md:col-span-2",
                                         label { class: "block text-gray-400 text-sm mb-1", "Description" }
                                         textarea {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
                                             rows: "3",
+                                            placeholder: "Describe the property, amenities, shared facilities...",
                                             value: "{desc_val}",
                                             oninput: move |e: Event<FormData>| form_description.set(e.value()),
                                         }
@@ -568,6 +582,7 @@ pub fn PropertiesPage() -> Element {
                                 }
                             }
 
+                            // Location
                             div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5 mb-4",
                                 h3 { class: "text-white font-bold mb-4", "Location" }
                                 div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
@@ -575,6 +590,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "County" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "e.g., Nairobi",
                                             value: "{county_val}",
                                             oninput: move |e: Event<FormData>| form_county.set(e.value()),
                                         }
@@ -583,6 +599,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Constituency" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "e.g., Westlands",
                                             value: "{constituency_val}",
                                             oninput: move |e: Event<FormData>| form_constituency.set(e.value()),
                                         }
@@ -591,6 +608,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Ward" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "e.g., Parklands/Highridge",
                                             value: "{ward_val}",
                                             oninput: move |e: Event<FormData>| form_ward.set(e.value()),
                                         }
@@ -599,6 +617,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Location / Area" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "e.g., Kilimani",
                                             value: "{loc_val}",
                                             oninput: move |e: Event<FormData>| form_location.set(e.value()),
                                         }
@@ -607,6 +626,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Village / Estate" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "e.g., Spring Valley",
                                             value: "{village_val}",
                                             oninput: move |e: Event<FormData>| form_village.set(e.value()),
                                         }
@@ -614,6 +634,7 @@ pub fn PropertiesPage() -> Element {
                                 }
                             }
 
+                            // Geolocation
                             div { class: "bg-gray-800 rounded-lg border border-gray-700 p-5 mb-4",
                                 h3 { class: "text-white font-bold mb-4", "Geolocation" }
                                 div { class: "grid grid-cols-2 gap-4",
@@ -621,6 +642,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Latitude" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "-1.2921",
                                             value: "{lat_val}",
                                             oninput: move |e: Event<FormData>| form_latitude.set(e.value()),
                                         }
@@ -629,6 +651,7 @@ pub fn PropertiesPage() -> Element {
                                         label { class: "block text-gray-400 text-sm mb-1", "Longitude" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                            placeholder: "36.8219",
                                             value: "{lng_val}",
                                             oninput: move |e: Event<FormData>| form_longitude.set(e.value()),
                                         }
@@ -638,12 +661,14 @@ pub fn PropertiesPage() -> Element {
                                     label { class: "block text-gray-400 text-sm mb-1", "Map Address" }
                                     input {
                                         class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                        placeholder: "e.g., Off Waiyaki Way, Near Westlands",
                                         value: "{map_addr_val}",
                                         oninput: move |e: Event<FormData>| form_map_address.set(e.value()),
                                     }
                                 }
                             }
 
+                            // Buttons
                             div { class: "flex gap-3",
                                 button {
                                     class: "flex-1 bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-4 rounded-lg",
@@ -667,7 +692,7 @@ pub fn PropertiesPage() -> Element {
                 div { class: "fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto",
                     div { class: "bg-gray-900 rounded-xl max-w-lg w-full my-8 max-h-[90vh] overflow-y-auto",
                         div { class: "p-6",
-                            div { class: "flex items-center justify-between mb-6",
+                            div { class: "flex items-center justify-between mb-2",
                                 div {
                                     h2 { class: "text-white text-xl font-bold", "Add Unit" }
                                     p { class: "text-gray-400 text-sm mt-1", "Property: {unit_pid_display}" }
@@ -680,12 +705,12 @@ pub fn PropertiesPage() -> Element {
                             }
 
                             if has_unit_error {
-                                div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-4",
+                                div { class: "bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-4 mt-4",
                                     p { class: "text-red-400 text-sm", "{unit_err}" }
                                 }
                             }
 
-                            div { class: "space-y-4",
+                            div { class: "space-y-4 mt-4",
                                 div { class: "grid grid-cols-2 gap-4",
                                     div {
                                         label { class: "block text-gray-400 text-sm mb-1", "Unit Number *" }
@@ -697,19 +722,36 @@ pub fn PropertiesPage() -> Element {
                                         }
                                     }
                                     div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Unit Type" }
+                                        label { class: "block text-gray-400 text-sm mb-1", "Unit Type *" }
                                         select {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
                                             value: "{utype_val}",
                                             onchange: move |e: Event<FormData>| unit_type.set(e.value()),
-                                            option { value: "apartment", "Apartment" }
+                                            option { value: "single_room", "Single Room" }
                                             option { value: "bedsitter", "Bedsitter" }
-                                            option { value: "single", "Single Room" }
                                             option { value: "studio", "Studio" }
+                                            option { value: "one_bedroom", "One Bedroom" }
+                                            option { value: "two_bedroom", "Two Bedroom" }
+                                            option { value: "three_bedroom", "Three Bedroom" }
+                                            option { value: "four_bedroom", "Four Bedroom+" }
                                             option { value: "maisonette", "Maisonette" }
-                                            option { value: "commercial", "Commercial" }
+                                            option { value: "bungalow", "Bungalow" }
+                                            option { value: "penthouse", "Penthouse" }
+                                            option { value: "commercial_space", "Commercial Space" }
                                             option { value: "office", "Office" }
+                                            option { value: "shop", "Shop / Retail" }
+                                            option { value: "warehouse", "Warehouse" }
                                         }
+                                    }
+                                }
+                                div {
+                                    label { class: "block text-gray-400 text-sm mb-1", "Purpose" }
+                                    select {
+                                        class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
+                                        value: "{upurpose_val}",
+                                        onchange: move |e: Event<FormData>| unit_purpose.set(e.value()),
+                                        option { value: "for_rent", "For Rent" }
+                                        option { value: "for_sale", "For Sale" }
                                     }
                                 }
                                 div { class: "grid grid-cols-3 gap-4",
@@ -753,10 +795,11 @@ pub fn PropertiesPage() -> Element {
                                         }
                                     }
                                     div {
-                                        label { class: "block text-gray-400 text-sm mb-1", "Price (KES)" }
+                                        label { class: "block text-gray-400 text-sm mb-1", "{unit_price_label}" }
                                         input {
                                             class: "w-full px-3 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg",
                                             r#type: "number",
+                                            placeholder: "25000",
                                             value: "{uprice_val}",
                                             oninput: move |e: Event<FormData>| unit_price.set(e.value()),
                                         }
@@ -787,6 +830,107 @@ pub fn PropertiesPage() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════
+// PROPERTY CARD COMPONENT
+// Separated to avoid rsx! macro parsing issues with nested Link + buttons
+// ═══════════════════════════════════════════
+#[component]
+fn PropertyCard(
+    property: PropertyInfo,
+    is_owner: bool,
+    on_navigate: EventHandler<MouseEvent>,
+    on_add_unit: EventHandler<MouseEvent>,
+) -> Element {
+    let title = property.title.clone();
+    let status = property.status.clone();
+    let location = property.location.clone();
+    let prop_type = property.property_type.clone();
+    let purpose = property.purpose.replace("_", " ");
+    let is_land = property.is_land;
+    let unit_count = property.unit_count;
+    let plot_size = property.plot_size.clone().unwrap_or_default();
+    let land_price = property.land_price.unwrap_or(0.0);
+    let min_price = property.min_unit_price.unwrap_or(0.0);
+    let max_price = property.max_unit_price.unwrap_or(0.0);
+    let owner_name = property.owner_name.clone();
+
+    let purpose_badge = match purpose.as_str() {
+        "for rent" => "bg-green-500/10 text-green-400 border-green-500/30",
+        "for sale" => "bg-blue-500/10 text-blue-400 border-blue-500/30",
+        _ => "bg-purple-500/10 text-purple-400 border-purple-500/30",
+    };
+
+    let price_display = if is_land {
+        format!("KES {:.0}", land_price)
+    } else if min_price > 0.0 && max_price > min_price {
+        format!("KES {:.0} - {:.0}", min_price, max_price)
+    } else if min_price > 0.0 {
+        format!("KES {:.0}", min_price)
+    } else {
+        "No units priced".to_string()
+    };
+
+    rsx! {
+        div {
+            class: "bg-gray-800 rounded-lg border border-gray-700 overflow-hidden hover:border-blue-500/50 transition-all",
+            // Clickable card body (navigates to detail)
+            div {
+                class: "p-5 cursor-pointer",
+                onclick: on_navigate,
+                div { class: "flex items-start justify-between mb-3",
+                    h3 { class: "text-white font-semibold text-lg", "{title}" }
+                    span { class: "px-2 py-1 rounded-full text-xs bg-gray-700 text-gray-300", "{status}" }
+                }
+                p { class: "text-gray-400 text-sm mb-3", "{location}" }
+
+                div { class: "flex items-center gap-2 mb-3",
+                    span { class: "px-2 py-1 rounded-full text-xs border {purpose_badge}", "{purpose}" }
+                    span { class: "px-2 py-1 rounded-full text-xs bg-gray-700 text-gray-300 capitalize", "{prop_type}" }
+                }
+
+                if is_land {
+                    div { class: "bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-3 mb-3",
+                        div { class: "flex justify-between text-sm",
+                            span { class: "text-gray-400", "Plot Size" }
+                            span { class: "text-white font-semibold", "{plot_size}" }
+                        }
+                        div { class: "flex justify-between text-sm mt-1",
+                            span { class: "text-gray-400", "Price" }
+                            span { class: "text-white font-semibold", "{price_display}" }
+                        }
+                    }
+                } else {
+                    div { class: "grid grid-cols-2 gap-3 mb-3",
+                        div { class: "text-center",
+                            p { class: "text-gray-500 text-xs", "Units" }
+                            p { class: "text-white font-semibold text-sm", "{unit_count}" }
+                        }
+                        div { class: "text-center",
+                            p { class: "text-gray-500 text-xs", "Price Range" }
+                            p { class: "text-white font-semibold text-xs", "{price_display}" }
+                        }
+                    }
+                }
+
+                if !owner_name.is_empty() {
+                    p { class: "text-gray-500 text-xs", "Owner: {owner_name}" }
+                }
+            }
+
+            // Action buttons (NOT inside the clickable area)
+            if is_owner && !is_land {
+                div { class: "px-5 pb-4",
+                    button {
+                        class: "w-full bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                        onclick: on_add_unit,
+                        "Add Unit"
                     }
                 }
             }

@@ -5,14 +5,23 @@ use chrono::{DateTime, Utc};
 pub struct Property {
     pub id: String,
     pub title: String,
-    pub price: f64,
+    pub description: Option<String>,
     pub status: String,
-    pub owner: String,
+
+    pub owner_name: String,
     pub location: String,
     pub property_type: String,
-    pub bedrooms: u32,
-    pub bathrooms: u32,
-    pub area_sqft: u32,
+    pub purpose: String,
+
+    pub is_land: bool,
+    pub plot_size: Option<String>,
+    pub plot_dimensions: Option<String>,
+    pub land_price: Option<f64>,
+
+    pub unit_count: i64,
+    pub min_unit_price: Option<f64>,
+    pub max_unit_price: Option<f64>,
+
     pub created_at: String,
 }
 
@@ -28,16 +37,34 @@ pub struct PropertyOwner {
 pub struct PropertyDetail {
     pub id: String,
     pub title: String,
-    pub description: String,
-    pub price: f64,
+    pub description: Option<String>,
     pub status: String,
+
     pub owner: PropertyOwner,
-    pub location: String,
+
+    pub county: Option<String>,
+    pub constituency: Option<String>,
+    pub ward: Option<String>,
+    pub location: Option<String>,
+    pub village: Option<String>,
+    pub display_location: String,
+
     pub property_type: String,
-    pub bedrooms: u32,
-    pub bathrooms: u32,
-    pub area_sqft: u32,
-    pub features: Vec<String>,
+    pub purpose: String,
+
+    pub is_land: bool,
+    pub plot_size: Option<String>,
+    pub plot_dimensions: Option<String>,
+    pub land_price: Option<f64>,
+
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub map_address: Option<String>,
+
+    pub unit_count: i64,
+    pub min_unit_price: Option<f64>,
+    pub max_unit_price: Option<f64>,
+
     pub images: Vec<String>,
     pub listing_date: String,
     pub views: u32,
@@ -48,14 +75,23 @@ pub struct PropertyDetail {
 pub struct PropertyDbRow {
     pub id: sqlx::types::Uuid,
     pub title: String,
-    pub price: f64,
+    pub description: Option<String>,
     pub status: String,
+
     pub owner_name: String,
     pub location: String,
     pub property_type: String,
-    pub bedrooms: i32,
-    pub bathrooms: i32,
-    pub area_sqft: i32,
+    pub purpose: String,
+
+    pub is_land: bool,
+    pub plot_size: Option<String>,
+    pub plot_dimensions: Option<String>,
+    pub land_price: Option<f64>,
+
+    pub unit_count: i64,
+    pub min_unit_price: Option<f64>,
+    pub max_unit_price: Option<f64>,
+
     pub created_at: DateTime<Utc>,
 }
 
@@ -64,14 +100,19 @@ impl From<PropertyDbRow> for Property {
         Self {
             id: row.id.to_string(),
             title: row.title,
-            price: row.price,
+            description: row.description,
             status: row.status,
-            owner: row.owner_name,
+            owner_name: row.owner_name,
             location: row.location,
             property_type: row.property_type,
-            bedrooms: row.bedrooms as u32,
-            bathrooms: row.bathrooms as u32,
-            area_sqft: row.area_sqft as u32,
+            purpose: row.purpose,
+            is_land: row.is_land,
+            plot_size: row.plot_size,
+            plot_dimensions: row.plot_dimensions,
+            land_price: row.land_price,
+            unit_count: row.unit_count,
+            min_unit_price: row.min_unit_price,
+            max_unit_price: row.max_unit_price,
             created_at: row.created_at.format("%Y-%m-%d").to_string(),
         }
     }
